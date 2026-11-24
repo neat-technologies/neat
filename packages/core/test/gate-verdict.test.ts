@@ -41,7 +41,7 @@ const sdiff = (over: Partial<SecurityDiff> = {}): SecurityDiff =>
     ...over,
   }) as SecurityDiff
 
-const vulnEntry = (advisoryId: string, pkg: string): SecurityDiffEntry =>
+const vulnEntry = (advisoryId: string, pkg: string, card: Record<string, unknown> = {}): SecurityDiffEntry =>
   ({
     advisoryId,
     ecosystem: 'npm',
@@ -53,9 +53,10 @@ const vulnEntry = (advisoryId: string, pkg: string): SecurityDiffEntry =>
       id: 'card',
       service: 'api',
       advisory: { id: advisoryId },
-      dependency: { version: '1.2.3' },
+      dependency: { version: '1.2.3', manifest: { file: 'package.json' } },
       fix: { fixedIn: ['1.2.4'] },
-      reachability: { importers: [{ file: 'src/app.ts', line: 7, provenance: 'EXTRACTED' }], observed: [] },
+      reachability: { level: 'imported', importers: [{ file: 'src/app.ts', line: 7, provenance: 'EXTRACTED' }], observed: [], supporting: [] },
+      ...card,
     },
   }) as unknown as SecurityDiffEntry
 
@@ -114,11 +115,100 @@ describe('buildGateVerdict (ADR-277)', () => {
     const f = v.findings.find((fi) => fi.kind === 'vulnerability')!
     expect(f.advisoryId).toBe('GHSA-xxxx')
     expect(f.fixedIn).toBe('1.2.4')
-    expect(f.locus).toEqual({ file: 'src/app.ts', line: 7 })
-    expect(f.affectedNode).toBe(serviceId('api'))
     expect(f.provenance).toBe(Provenance.EXTRACTED)
     expect(f.findingId).toMatch(/^[0-9a-f]{64}$/)
     expect(v.passed).toBe(false)
+  })
+
+  // Where a vulnerability finding points depends on how it is fixed (#1751, ruled 2026-11-21).
+  describe('a vulnerability finding points at code by fix type', () => {
+    const finding = (card: Record<string, unknown>) =>
+      buildGateVerdict(input({ securityDiff: sdiff({ introduced: [vulnEntry('GHSA-xxxx', 'left-pad', card)] }) })).findings.find(
+        (fi) => fi.kind === 'vulnerability',
+      )!
+    const bump = { fix: { fixedIn: ['1.2.4'], action: { kind: 'bump-to-fixedIn', to: '1.2.4', via: [] } } }
+    const replace = { fix: { fixedIn: null, action: { kind: 'remove-or-replace', reason: 'no fixed release' } } }
+
+    it('a bump points at the manifest, on the importing service', () => {
+      const f = finding({ ...bump, dependency: { version: '1.2.3', manifest: { file: '/package-lock.json', line: 12 } } })
+      expect(f.affectedNode).toBe(serviceId('api'))
+      expect(f.locus).toEqual({ file: 'package-lock.json', line: 12 })
+    })
+
+    it('a bump with no recorded manifest file has no locus', () => {
+      const f = finding({ ...bump, dependency: { version: '1.2.3', manifest: { file: '' } } })
+      expect(f.affectedNode).toBe(serviceId('api'))
+      expect(f.locus).toBeNull()
+    })
+
+    it('a remove-or-replace on a reachable-static card points at the head of the call path', () => {
+      const caller = 'symbol:api:src/routes/orders.ts#OrderRoute.handle'
+      const f = finding({
+        ...replace,
+        reachability: {
+          level: 'reachable-static',
+          importers: [{ file: 'src/app.ts', line: 7, provenance: 'EXTRACTED' }],
+          path: [{ from: caller, to: 'symbol:dep:npm:left-pad@1.2.3:index.js#leftPad', provenance: 'EXTRACTED' }],
+          observed: [],
+          supporting: [],
+        },
+      })
+      expect(f.affectedNode).toBe(caller)
+      expect(f.locus).toEqual({ file: 'src/routes/orders.ts', symbol: 'OrderRoute.handle' })
+    })
+
+    it('a call path that starts at a file points at the file', () => {
+      const f = finding({
+        ...replace,
+        reachability: {
+          level: 'reachable-static',
+          importers: [],
+          path: [{ from: 'file:api:src/boot.ts', to: 'symbol:dep:npm:left-pad@1.2.3:index.js#leftPad', provenance: 'EXTRACTED' }],
+          observed: [],
+          supporting: [],
+        },
+      })
+      expect(f.affectedNode).toBe('file:api:src/boot.ts')
+      expect(f.locus).toEqual({ file: 'src/boot.ts' })
+    })
+
+    it('a remove-or-replace on a reachable-observed card points at the importer seen running', () => {
+      const runner = 'symbol:api:src/jobs/sync.ts#syncAll'
+      const f = finding({
+        ...replace,
+        reachability: {
+          level: 'reachable-observed',
+          importers: [{ file: 'src/app.ts', line: 7, provenance: 'EXTRACTED' }],
+          observed: [{ source: 'instrumentation-scope', at: '2026-11-21T00:00:00Z', provenance: 'OBSERVED' }],
+          supporting: [{ kind: 'importer-observed', symbol: runner, at: '2026-11-21T00:00:00Z' }],
+        },
+      })
+      expect(f.affectedNode).toBe(runner)
+      expect(f.locus).toEqual({ file: 'src/jobs/sync.ts', symbol: 'syncAll' })
+      expect(f.provenance).toBe(Provenance.OBSERVED)
+    })
+
+    it('a remove-or-replace with no first-party caller points at the service with no locus', () => {
+      // Imported only: an importer is not a caller, so nothing is named.
+      const f = finding(replace)
+      expect(f.affectedNode).toBe(serviceId('api'))
+      expect(f.locus).toBeNull()
+    })
+
+    it('the finding id does not depend on where it points', () => {
+      const a = finding(bump).findingId
+      const b = finding({
+        ...replace,
+        reachability: {
+          level: 'reachable-static',
+          importers: [],
+          path: [{ from: 'symbol:api:src/a.ts#f', to: 'symbol:dep:npm:left-pad@1.2.3:index.js#leftPad', provenance: 'EXTRACTED' }],
+          observed: [],
+          supporting: [],
+        },
+      }).findingId
+      expect(a).toBe(b)
+    })
   })
 
   it('blast radius over the ceiling fails', () => {

@@ -21,7 +21,8 @@ ADR-279, ruled by Deniz on 2026-11-16 (neat-infra #293): a finding's newness is 
 ## 2. Identity
 
 - `findingId` is the no-regression gate's (ADR-277): `sha256("divergence\0" + divergenceIdentity)` for a divergence, the gate's vulnerability finding id for a vulnerability. One function serves the gate and this ledger.
-- The commit is the `ready` `sourceBaselines` entry of the repository that declares the affected node ([`source-baseline.md`](./source-baseline.md)). No `ready` baseline, no record.
+- A row's `affectedNode` is the gate's: the divergence's declaring side, and for a vulnerability the node it points at by fix type ([`no-regression-gate.md`](./no-regression-gate.md), ruled 2026-11-21, #1751), which is the importing service for a bump and the first first-party caller otherwise.
+- The commit is the `ready` `sourceBaselines` entry of the repository that declares the affected node ([`source-baseline.md`](./source-baseline.md)). For a vulnerability the repository is the importing service's, whichever node it points at. No `ready` baseline, no record.
 - A vulnerability is recorded against the default-branch baseline only.
 - The ledger key is `(findingId, sha)`.
 
