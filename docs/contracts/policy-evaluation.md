@@ -20,11 +20,14 @@ The second of four policy contracts. Sibling contracts: [`policy-schema.md`](./p
 evaluateAllPolicies(
   graph: NeatGraph,
   policies: Policy[],
-  context: EvaluationContext
+  context: EvaluationContext,
+  scope?: 'all' | { env: string }   // default 'all'
 ): PolicyViolation[]
 ```
 
 Pure function. Walks the policy list, dispatches each by `policy.rule.type` to a per-type evaluator, accumulates violations.
+
+**Per environment (ADR-280 decision 7).** One set of policies, checked against each environment separately. On a graph with runtime evidence in a named environment, each policy is evaluated on the graph with no runtime edges and on the graph with only one environment's runtime edges (in-memory copies; the live graph is not written). A violation the static evaluation and every evaluated environment produce identically is static structure: it is reported once, with no `env`. Any other violation carries `env`. `scope: 'all'` evaluates every environment present (the violations ledger, watch, the graduation gate); `{ env }` answers for one (REST `POST /policies/check`, which resolves the project's default environment, see [`env-dimension.md`](./env-dimension.md) §7). A graph whose runtime evidence is all `unknown`, or that has none, is evaluated exactly as before.
 
 ## Triggers
 
@@ -46,13 +49,14 @@ Other call sites (REST `POST /policies/check`, MCP `check_policies`) call the sa
   ruleType: PolicyRule['type'],
   subject: { nodeId?: string; edgeId?: string; path?: string[] },
   message: string,
-  observedAt: ISO8601
+  observedAt: ISO8601,
+  env?: string                 // the environment whose runtime evidence produced it (ADR-280)
 }
 ```
 
 ## Deterministic ids
 
-Same graph + same policies → same violation ids. Append-only `policy-violations.ndjson` keys on `id`; duplicates skipped at write time.
+Same graph + same policies → same violation ids. A violation from one environment's evidence keeps its id when the graph holds one environment (an edge subject already names a named environment through the edge id, `OBSERVED@<env>`). When the graph holds more than one, a node or path subject's id is qualified with the environment, `${policy.id}:${context}@${env}`, so two environments never share an id; an edge subject is already distinct through its edge id. Append-only `policy-violations.ndjson` keys on `id`; duplicates skipped at write time.
 
 ## Per-type dispatch
 

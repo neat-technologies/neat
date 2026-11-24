@@ -1,10 +1,22 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { NodeType, Provenance, databaseId, legacyDatabaseId, observedEdgeId } from '@neat.is/types'
+import {
+  ENV_UNKNOWN,
+  NodeType,
+  Provenance,
+  databaseId,
+  inferredEdgeId,
+  legacyDatabaseId,
+  normalizeEnv,
+  observedEdgeId,
+  parseEdgeId,
+  parseServiceId,
+  serviceId,
+} from '@neat.is/types'
 import { canonicalEngine } from './compat.js'
 import type { NeatGraph } from './graph.js'
 
-export const SCHEMA_VERSION = 10
+export const SCHEMA_VERSION = 11
 
 export interface PersistedGraph {
   schemaVersion: number
@@ -175,6 +187,145 @@ function migrateV9ToV10(payload: PersistedGraph): PersistedGraph {
     }
   }
   return { ...payload, schemaVersion: 10 }
+}
+
+// v10 → v11: environment is a dimension of runtime evidence, not part of a code
+// node's identity (ADR-280 decision 10). Runtime edge ids now carry their
+// environment, and `unknown` keeps the env-less form, so every OBSERVED, INFERRED
+// and STALE edge already on disk is the `unknown` edge under its existing id and
+// needs no rewrite. Two things do change:
+//
+// - An env-tagged service twin (`service:<name>:<env>`) that an older daemon
+//   minted beside a statically extracted service of the same name (compared
+//   without case) is folded into the extracted node. Its edges move onto the
+//   extracted node, and its runtime edges are re-keyed to the twin's environment,
+//   which is where that evidence came from. An edge that lands on an id already
+//   present is merged into it: counts are added and the later `lastObserved` kept.
+//   The twin's own attributes go with it.
+// - An OTel-only service whose id carries an environment that normalisation now
+//   changes (`service:checkout:Prod`) moves to the normalised id, so the next span
+//   from that environment lands on the same node.
+//
+// Past incidents with no `env` read as `unknown`; they live in the incident ledger,
+// not the snapshot, and nothing is rewritten for them. Idempotent.
+type SerializedNode = { key: string; attributes?: Record<string, unknown> }
+type SerializedEdge = { key?: string; source: string; target: string; attributes?: Record<string, unknown> }
+
+function mergeEdgeAttributes(into: Record<string, unknown>, from: Record<string, unknown>): void {
+  const num = (v: unknown): number => (typeof v === 'number' ? v : 0)
+  if (into.callCount !== undefined || from.callCount !== undefined) into.callCount = num(into.callCount) + num(from.callCount)
+  const a = into.signal as Record<string, unknown> | undefined
+  const b = from.signal as Record<string, unknown> | undefined
+  if (a && b) {
+    a.spanCount = num(a.spanCount) + num(b.spanCount)
+    a.errorCount = num(a.errorCount) + num(b.errorCount)
+  } else if (!a && b) {
+    into.signal = b
+  }
+  const la = typeof into.lastObserved === 'string' ? into.lastObserved : undefined
+  const lb = typeof from.lastObserved === 'string' ? from.lastObserved : undefined
+  if (lb && (!la || lb > la)) into.lastObserved = lb
+}
+
+function migrateV10ToV11(payload: PersistedGraph): PersistedGraph {
+  const g = payload.graph as { nodes?: SerializedNode[]; edges?: SerializedEdge[] }
+  const nodes = Array.isArray(g.nodes) ? g.nodes : []
+  const edges = Array.isArray(g.edges) ? g.edges : []
+
+  // Statically extracted services by lower-cased name. Two with one name is an
+  // ambiguity the fold does not resolve: neither is used.
+  const extractedByName = new Map<string, string | null>()
+  for (const n of nodes) {
+    const a = n.attributes
+    if (!a || a.type !== NodeType.ServiceNode || a.discoveredVia === 'otel') continue
+    if (typeof a.name !== 'string') continue
+    const k = a.name.toLowerCase()
+    extractedByName.set(k, extractedByName.has(k) ? null : n.key)
+  }
+  const taken = new Set(nodes.map((n) => n.key))
+
+  // old node id → { id it moves to, environment its runtime edges carry }
+  const moves = new Map<string, { to: string; env: string }>()
+  const dropped = new Set<string>()
+  for (const n of nodes) {
+    const a = n.attributes
+    if (!a || a.type !== NodeType.ServiceNode) continue
+    const parsed = parseServiceId(n.key)
+    if (!parsed || parsed.env === ENV_UNKNOWN) continue
+    const name = typeof a.name === 'string' ? a.name : parsed.name
+    const extracted = extractedByName.get(name.toLowerCase())
+    if (extracted && extracted !== n.key && a.discoveredVia === 'otel') {
+      moves.set(n.key, { to: extracted, env: normalizeEnv(parsed.env) })
+      dropped.add(n.key)
+      continue
+    }
+    const env = normalizeEnv(parsed.env)
+    const next = serviceId(parsed.name, env)
+    if (next === n.key) continue
+    if (taken.has(next)) {
+      moves.set(n.key, { to: next, env: ENV_UNKNOWN })
+      dropped.add(n.key)
+      continue
+    }
+    moves.set(n.key, { to: next, env: ENV_UNKNOWN })
+    taken.add(next)
+    n.key = next
+    a.id = next
+    if (env === ENV_UNKNOWN) delete a.env
+    else a.env = env
+  }
+  if (moves.size === 0) return { ...payload, schemaVersion: 11 }
+
+  const keptNodes = nodes.filter((n) => !dropped.has(n.key))
+  const byId = new Map<string, SerializedEdge>()
+  for (const e of edges) {
+    const id = typeof e.attributes?.id === 'string' ? e.attributes.id : e.key
+    if (id) byId.set(id, e)
+  }
+  const keptEdges: SerializedEdge[] = []
+  for (const e of edges) {
+    const a = e.attributes ?? {}
+    const oldId = typeof a.id === 'string' ? a.id : e.key
+    const sm = moves.get(e.source)
+    const tm = moves.get(e.target)
+    if (!sm && !tm) {
+      keptEdges.push(e)
+      continue
+    }
+    const source = sm?.to ?? e.source
+    const target = tm?.to ?? e.target
+    const env = sm?.env !== undefined && sm.env !== ENV_UNKNOWN ? sm.env : tm?.env ?? ENV_UNKNOWN
+    const parsed = oldId ? parseEdgeId(oldId) : null
+    let newId: string | undefined
+    if (parsed && parsed.provenance === 'OBSERVED') newId = observedEdgeId(source, target, parsed.type, env)
+    else if (parsed && parsed.provenance === 'INFERRED') newId = inferredEdgeId(source, target, parsed.type, env)
+    else {
+      const tail = `${e.source}->${e.target}`
+      newId = oldId?.endsWith(tail) ? oldId.slice(0, -tail.length) + `${source}->${target}` : oldId
+    }
+    if (oldId) byId.delete(oldId)
+    const runtime = parsed && (parsed.provenance === 'OBSERVED' || parsed.provenance === 'INFERRED')
+    if (runtime && env !== ENV_UNKNOWN) a.env = env
+    const clash = newId ? byId.get(newId) : undefined
+    if (clash && clash !== e) {
+      if (clash.attributes) mergeEdgeAttributes(clash.attributes, a)
+      continue
+    }
+    e.source = source
+    e.target = target
+    a.source = source
+    a.target = target
+    if (newId !== undefined) {
+      a.id = newId
+      if (e.key !== undefined) e.key = newId
+      byId.set(newId, e)
+    }
+    e.attributes = a
+    keptEdges.push(e)
+  }
+  g.nodes = keptNodes
+  g.edges = keptEdges
+  return { ...payload, schemaVersion: 11 }
 }
 
 function migrateV2ToV3(payload: PersistedGraph): PersistedGraph {
@@ -373,6 +524,9 @@ export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
   }
   if (payload.schemaVersion === 9) {
     payload = migrateV9ToV10(payload)
+  }
+  if (payload.schemaVersion === 10) {
+    payload = migrateV10ToV11(payload)
   }
   if (payload.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(

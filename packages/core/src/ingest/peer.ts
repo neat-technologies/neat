@@ -76,6 +76,7 @@ export function ingestPeerSpan(s: SpanIngest): void {
       callSiteEvidence,
       durationMs,
       errorDetail,
+      s.env,
     )
     resolvedViaAddress = true
   }
@@ -115,6 +116,7 @@ export function ingestPeerSpan(s: SpanIngest): void {
       callSiteEvidence,
       durationMs,
       errorDetail,
+      s.env,
     )
     resolvedViaAddress = true
   }
@@ -133,6 +135,7 @@ export function ingestPeerSpan(s: SpanIngest): void {
         callSiteEvidence,
         durationMs,
         errorDetail,
+        s.env,
       )
       resolvedViaAddress = true
     } else if (!targetId && !grpcMethodNodeId) {
@@ -149,6 +152,7 @@ export function ingestPeerSpan(s: SpanIngest): void {
         callSiteEvidence,
         durationMs,
         errorDetail,
+        s.env,
       )
       resolvedViaAddress = true
     }
@@ -194,6 +198,7 @@ export function ingestPeerSpan(s: SpanIngest): void {
         fallbackEvidence,
         durationMs,
         errorDetail,
+        s.env,
       )
     }
   }

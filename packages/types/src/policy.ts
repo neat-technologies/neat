@@ -264,5 +264,9 @@ export const PolicyViolationSchema = z.object({
     ),
   message: z.string().min(1),
   observedAt: z.string().datetime(),
+  // The environment whose runtime evidence produced the violation (ADR-280
+  // decision 7). Absent for a violation static structure alone produces, and for
+  // `unknown`.
+  env: z.string().optional(),
 })
 export type PolicyViolation = z.infer<typeof PolicyViolationSchema>

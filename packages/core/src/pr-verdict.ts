@@ -23,6 +23,7 @@
 // Bounds: one verdict at a time per daemon, one scratch graph per commit, a
 // wall-clock limit, and temp dirs removed whatever happens.
 
+import { resolveEnvironment } from './runtime-env.js'
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
@@ -263,10 +264,20 @@ async function computePrVerdict(
       changedNodeIds(base, head),
     )
     const observedBreaks = []
+    // Production calling what the change removes (ADR-280: the production
+    // environment, else the only one present). A project with several and none
+    // of them production is asked once per environment, one break per node.
+    const resolved = resolveEnvironment(ctx.liveGraph)
+    const envs = 'refused' in resolved ? resolved.environments : [resolved.env]
     for (const node of changedNodesForObservedScan(base, head)) {
       if (!ctx.liveGraph.hasNode(node.id)) continue
-      const found = observedBreakFrom(node, getObservedDependencies(ctx.liveGraph, node.id))
-      if (found) observedBreaks.push(found)
+      for (const env of envs) {
+        const found = observedBreakFrom(node, getObservedDependencies(ctx.liveGraph, node.id, { env }))
+        if (found) {
+          observedBreaks.push(found)
+          break
+        }
+      }
     }
 
     // No-regression gate (ADR-277): the four conditions + the Sniper-targetable findings, from the same

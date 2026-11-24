@@ -170,6 +170,7 @@ export function ingestDatabaseSpan(s: SpanIngest): void {
       callSiteEvidence,
       durationMs,
       errorDetail,
+      s.env,
     )
 
     // ADR-148 — a mongodb span also names the collection it operated on, one
@@ -194,6 +195,7 @@ export function ingestDatabaseSpan(s: SpanIngest): void {
         callSiteEvidence,
         durationMs,
         errorDetail,
+        s.env,
       )
     }
     // A SQL span's table (ADR-152), recovered from `db.statement` because the
@@ -214,6 +216,7 @@ export function ingestDatabaseSpan(s: SpanIngest): void {
         callSiteEvidence,
         durationMs,
         errorDetail,
+        s.env,
       )
       // ADR-157 — the same `db.statement` that named the table also names the
       // columns it touched. Merge them onto the table node as OBSERVED column

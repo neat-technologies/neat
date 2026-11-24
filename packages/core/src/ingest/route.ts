@@ -183,7 +183,7 @@ export function ingestServerRoute(s: SpanIngest): void {
     }
     if (routeNodeId) {
       const routeSvc = (ctx.graph.getNodeAttributes(routeNodeId) as RouteNode).service
-      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs, errorDetail)
+      upsertObservedEdge(ctx.graph, EdgeType.CONTAINS, serviceId(routeSvc), routeNodeId, ts, isError, undefined, durationMs, errorDetail, s.env)
     }
   }
 }

@@ -1,0 +1,1423 @@
+{
+  "unknown": {
+    "nodes": {
+      "service:web": {
+        "id": "service:web",
+        "type": "ServiceNode",
+        "name": "web",
+        "language": "javascript"
+      },
+      "service:orders": {
+        "id": "service:orders",
+        "type": "ServiceNode",
+        "name": "orders",
+        "language": "javascript"
+      },
+      "service:billing": {
+        "id": "service:billing",
+        "type": "ServiceNode",
+        "name": "billing",
+        "language": "javascript"
+      },
+      "database:postgresql:orders-db": {
+        "id": "database:postgresql:orders-db",
+        "type": "DatabaseNode",
+        "name": "orders",
+        "engine": "postgresql",
+        "engineVersion": "15",
+        "compatibleDrivers": []
+      },
+      "service:search": {
+        "id": "service:search",
+        "type": "ServiceNode",
+        "name": "search",
+        "language": "unknown",
+        "discoveredVia": "otel"
+      }
+    },
+    "edges": {
+      "CALLS:service:web->service:orders": {
+        "id": "CALLS:service:web->service:orders",
+        "source": "service:web",
+        "target": "service:orders",
+        "type": "CALLS",
+        "provenance": "EXTRACTED",
+        "confidence": 0.85
+      },
+      "CONNECTS_TO:service:orders->database:postgresql:orders-db": {
+        "id": "CONNECTS_TO:service:orders->database:postgresql:orders-db",
+        "source": "service:orders",
+        "target": "database:postgresql:orders-db",
+        "type": "CONNECTS_TO",
+        "provenance": "EXTRACTED",
+        "confidence": 0.85
+      },
+      "CALLS:service:orders->service:billing": {
+        "id": "CALLS:service:orders->service:billing",
+        "source": "service:orders",
+        "target": "service:billing",
+        "type": "CALLS",
+        "provenance": "EXTRACTED",
+        "confidence": 0.85
+      },
+      "CALLS:OBSERVED:service:web->service:orders": {
+        "id": "CALLS:OBSERVED:service:web->service:orders",
+        "source": "service:web",
+        "target": "service:orders",
+        "type": "CALLS",
+        "provenance": "OBSERVED",
+        "confidence": 0.378,
+        "lastObserved": "2026-11-18T11:59:04.000Z",
+        "callCount": 3,
+        "signal": {
+          "spanCount": 3,
+          "errorCount": 1,
+          "lastObservedAgeMs": 0,
+          "latencyHist": {
+            "229": 1,
+            "239": 1
+          },
+          "latencyMs": {
+            "p50": 20.5,
+            "p95": 30.5
+          },
+          "lastError": {
+            "exceptionType": "TypeError",
+            "message": "Cannot read properties of undefined (reading 'map')",
+            "httpStatusCode": 500,
+            "at": "2026-11-18T11:59:04.000Z"
+          }
+        },
+        "grain": "service"
+      },
+      "CONNECTS_TO:OBSERVED:service:orders->database:postgresql:orders-db": {
+        "id": "CONNECTS_TO:OBSERVED:service:orders->database:postgresql:orders-db",
+        "source": "service:orders",
+        "target": "database:postgresql:orders-db",
+        "type": "CONNECTS_TO",
+        "provenance": "OBSERVED",
+        "confidence": 0.4,
+        "lastObserved": "2026-11-18T11:59:03.000Z",
+        "callCount": 1,
+        "signal": {
+          "spanCount": 1,
+          "errorCount": 0,
+          "lastObservedAgeMs": 0
+        },
+        "grain": "service"
+      },
+      "CALLS:INFERRED:service:orders->service:billing": {
+        "id": "CALLS:INFERRED:service:orders->service:billing",
+        "source": "service:orders",
+        "target": "service:billing",
+        "type": "CALLS",
+        "provenance": "INFERRED",
+        "confidence": 0.6,
+        "lastObserved": "2026-11-18T11:59:04.000Z"
+      },
+      "CALLS:OBSERVED:service:search->service:orders": {
+        "id": "CALLS:OBSERVED:service:search->service:orders",
+        "source": "service:search",
+        "target": "service:orders",
+        "type": "CALLS",
+        "provenance": "OBSERVED",
+        "confidence": 0.4,
+        "lastObserved": "2026-11-18T11:59:05.000Z",
+        "callCount": 1,
+        "signal": {
+          "spanCount": 1,
+          "errorCount": 0,
+          "lastObservedAgeMs": 0
+        },
+        "grain": "service"
+      }
+    },
+    "incidents": [
+      {
+        "id": "trace-1:b2",
+        "timestamp": "2026-11-18T11:59:04.000Z",
+        "service": "orders",
+        "traceId": "trace-1",
+        "spanId": "b2",
+        "errorMessage": "Cannot read properties of undefined (reading 'map')",
+        "exceptionType": "TypeError",
+        "httpStatusCode": 500,
+        "attributes": {
+          "http.method": "POST",
+          "http.route": "/checkout",
+          "http.response.status_code": 500
+        },
+        "affectedNode": "service:orders"
+      }
+    ],
+    "divergences": {
+      "divergences": [
+        {
+          "type": "missing-observed",
+          "source": "service:orders",
+          "target": "service:billing",
+          "confidence": 0.85,
+          "reason": "Code declares service:orders → service:billing (CALLS) but no production traffic has been observed for this edge.",
+          "recommendation": "Verify the code path is exercised in production; check feature flags or conditional branches that might gate the call.",
+          "edgeType": "CALLS",
+          "extracted": {
+            "id": "CALLS:service:orders->service:billing",
+            "source": "service:orders",
+            "target": "service:billing",
+            "type": "CALLS",
+            "provenance": "EXTRACTED",
+            "confidence": 0.85
+          }
+        },
+        {
+          "type": "missing-extracted",
+          "source": "service:search",
+          "target": "service:orders",
+          "confidence": 0.4,
+          "reason": "Production observed service:search → service:orders (CALLS) but static analysis did not surface this edge.",
+          "recommendation": "Likely dynamic dispatch, reflection, or a coverage gap in tree-sitter extraction. Consider an `aliases` entry on the source service or file an extractor issue.",
+          "edgeType": "CALLS",
+          "observed": {
+            "id": "CALLS:OBSERVED:service:search->service:orders",
+            "source": "service:search",
+            "target": "service:orders",
+            "type": "CALLS",
+            "provenance": "OBSERVED",
+            "confidence": 0.4,
+            "lastObserved": "2026-11-18T11:59:05.000Z",
+            "callCount": 1,
+            "signal": {
+              "spanCount": 1,
+              "errorCount": 0,
+              "lastObservedAgeMs": 0
+            },
+            "grain": "service"
+          }
+        }
+      ],
+      "totalAffected": 2,
+      "computedAt": "2026-11-18T12:00:00.000Z",
+      "observedEdges": 3
+    },
+    "rootCause": {
+      "rootCauseNode": "service:orders",
+      "rootCauseReason": "orders: Cannot read properties of undefined (reading 'map') (1 recorded incident)",
+      "traversalPath": [
+        "service:orders"
+      ],
+      "edgeProvenances": [],
+      "confidence": 0.6,
+      "fixRecommendation": "Inspect orders's handler for /checkout",
+      "candidates": [
+        {
+          "node": "service:orders",
+          "classification": "primary-failure",
+          "reason": "orders: Cannot read properties of undefined (reading 'map') (1 recorded incident)",
+          "context": {
+            "errorsEmittedHere": 1,
+            "errorsFromCallers": 1,
+            "callCount": 4,
+            "outboundVolume": 1,
+            "lastObservedAgeMs": 55000,
+            "latencyP95Ms": 30.5,
+            "stale": false,
+            "boundaryTimeout": false,
+            "observedErroringDownstream": false,
+            "hasOutboundDeps": true
+          },
+          "confidence": 0.6
+        }
+      ]
+    },
+    "blastRadius": {
+      "origin": "database:postgresql:orders-db",
+      "affectedNodes": [
+        {
+          "nodeId": "service:orders",
+          "distance": 1,
+          "edgeProvenance": "OBSERVED",
+          "path": [
+            "database:postgresql:orders-db",
+            "service:orders"
+          ],
+          "confidence": 0.6003433318879937
+        },
+        {
+          "nodeId": "service:search",
+          "distance": 2,
+          "edgeProvenance": "OBSERVED",
+          "path": [
+            "database:postgresql:orders-db",
+            "service:orders",
+            "service:search"
+          ],
+          "confidence": 0.3604121161423778
+        },
+        {
+          "nodeId": "service:web",
+          "distance": 2,
+          "edgeProvenance": "OBSERVED",
+          "path": [
+            "database:postgresql:orders-db",
+            "service:orders",
+            "service:web"
+          ],
+          "confidence": 0.224348035381738
+        }
+      ],
+      "totalAffected": 3
+    },
+    "dependencies": {
+      "origin": "service:web",
+      "depth": 3,
+      "dependencies": [
+        {
+          "nodeId": "service:orders",
+          "distance": 1,
+          "edgeType": "CALLS",
+          "provenance": "OBSERVED"
+        },
+        {
+          "nodeId": "database:postgresql:orders-db",
+          "distance": 2,
+          "edgeType": "CONNECTS_TO",
+          "provenance": "OBSERVED"
+        },
+        {
+          "nodeId": "service:billing",
+          "distance": 2,
+          "edgeType": "CALLS",
+          "provenance": "INFERRED"
+        }
+      ],
+      "total": 3
+    },
+    "observedDependencies": {
+      "origin": "service:web",
+      "dependencies": [
+        {
+          "id": "CALLS:OBSERVED:service:web->service:orders",
+          "source": "service:web",
+          "target": "service:orders",
+          "type": "CALLS",
+          "provenance": "OBSERVED",
+          "confidence": 0.378,
+          "lastObserved": "2026-11-18T11:59:04.000Z",
+          "callCount": 3,
+          "signal": {
+            "spanCount": 3,
+            "errorCount": 1,
+            "lastObservedAgeMs": 0,
+            "latencyMs": {
+              "p50": 20.5,
+              "p95": 30.5
+            },
+            "latencyHist": {
+              "229": 1,
+              "239": 1
+            },
+            "lastError": {
+              "exceptionType": "TypeError",
+              "message": "Cannot read properties of undefined (reading 'map')",
+              "at": "2026-11-18T11:59:04.000Z",
+              "httpStatusCode": 500
+            }
+          },
+          "grain": "service"
+        }
+      ],
+      "observed": true,
+      "inboundObservedCount": 0,
+      "hasExtractedOutbound": true,
+      "inboundVolume": 0,
+      "window": "lifetime"
+    },
+    "policyViolations": [
+      {
+        "id": "calls-into-billing-observed:CALLS:service:orders->service:billing",
+        "policyId": "calls-into-billing-observed",
+        "policyName": "calls into billing must be observed",
+        "severity": "error",
+        "onViolation": "alert",
+        "ruleType": "provenance",
+        "subject": {
+          "edgeId": "CALLS:service:orders->service:billing"
+        },
+        "message": "CALLS edge CALLS:service:orders->service:billing has provenance EXTRACTED; required ",
+        "observedAt": "2026-11-18T12:00:00.000Z"
+      },
+      {
+        "id": "calls-into-billing-observed:CALLS:INFERRED:service:orders->service:billing",
+        "policyId": "calls-into-billing-observed",
+        "policyName": "calls into billing must be observed",
+        "severity": "error",
+        "onViolation": "alert",
+        "ruleType": "provenance",
+        "subject": {
+          "edgeId": "CALLS:INFERRED:service:orders->service:billing"
+        },
+        "message": "CALLS edge CALLS:INFERRED:service:orders->service:billing has provenance INFERRED; required ",
+        "observedAt": "2026-11-18T12:00:00.000Z"
+      }
+    ],
+    "nodeCard": {
+      "kind": "incident",
+      "id": null,
+      "at": null,
+      "incidentKind": null,
+      "service": "orders",
+      "affectedNode": "service:orders",
+      "message": null,
+      "noIncident": {
+        "reason": "composed from the graph; no recorded incident for this node, so the fields only an incident supplies (id, at, incidentKind, message) are null"
+      },
+      "locus": null,
+      "rootCause": {
+        "node": "service:orders",
+        "classification": "primary-failure",
+        "reason": "orders: Cannot read properties of undefined (reading 'map') (1 recorded incident)",
+        "confidence": 0.6,
+        "fix": "Inspect orders's handler for /checkout",
+        "chain": [
+          {
+            "node": "service:orders",
+            "grain": "service",
+            "provenance": "INFERRED"
+          }
+        ]
+      },
+      "rankedCandidates": [
+        {
+          "node": "service:orders",
+          "classification": "cause",
+          "onset": "new",
+          "evidence": [
+            "divergence: service:orders → service:billing",
+            "divergence: service:search → service:orders",
+            "1 incident, latest: Cannot read properties of undefined (reading 'map')"
+          ]
+        },
+        {
+          "node": "service:search",
+          "classification": "on-path",
+          "evidence": [
+            "divergence: service:search → service:orders"
+          ]
+        }
+      ],
+      "blastRadius": {
+        "totalAffected": 2,
+        "nearest": [
+          {
+            "node": "service:search",
+            "distance": 1,
+            "provenance": "OBSERVED"
+          },
+          {
+            "node": "service:web",
+            "distance": 1,
+            "provenance": "OBSERVED"
+          }
+        ]
+      },
+      "policies": [
+        {
+          "policyName": "calls into billing must be observed",
+          "severity": "error",
+          "message": "this node sits on a CALLS edge to service:billing, which must carry undefined provenance",
+          "onViolation": "alert"
+        }
+      ],
+      "divergence": [
+        {
+          "type": "missing-observed",
+          "summary": "service:orders → service:billing"
+        },
+        {
+          "type": "missing-extracted",
+          "summary": "service:search → service:orders"
+        }
+      ],
+      "headline": "SERVICE orders has no recorded incident",
+      "grade": {
+        "G": 0,
+        "gamma": 0,
+        "gates": {
+          "policyNotBlock": {
+            "passed": true,
+            "evidence": [
+              "policies[].onViolation"
+            ]
+          },
+          "notSymptomOnly": {
+            "passed": true,
+            "evidence": [
+              "rootCause.classification"
+            ]
+          },
+          "locusResolves": {
+            "passed": false,
+            "evidence": [
+              "locus"
+            ]
+          }
+        },
+        "C": 0.7138,
+        "factors": {
+          "evidence": {
+            "value": 0.4,
+            "weight": 3,
+            "evidence": [
+              "rootCause.chain[].provenance"
+            ]
+          },
+          "locus": {
+            "value": null,
+            "weight": 2,
+            "evidence": [
+              "locus"
+            ],
+            "reason": "no locus on the card (the locus gate fails)"
+          },
+          "tests": {
+            "value": null,
+            "weight": 2,
+            "evidence": [],
+            "reason": "the card carries no test-file classification or test-to-symbol edges"
+          },
+          "reach": {
+            "value": 0.96,
+            "weight": 1.5,
+            "evidence": [
+              "blastRadius.totalAffected"
+            ],
+            "reason": "nodes in the blast radius against a prior bound of 50"
+          },
+          "kind": {
+            "value": null,
+            "weight": 1.5,
+            "evidence": [
+              "incidentKind",
+              "exceptionType",
+              "message"
+            ],
+            "reason": "no incident on the card"
+          },
+          "chain": {
+            "value": 1,
+            "weight": 1,
+            "evidence": [
+              "rootCause.chain"
+            ]
+          },
+          "recur": {
+            "value": null,
+            "weight": 1,
+            "evidence": [
+              "count"
+            ],
+            "reason": "no incident on the card"
+          },
+          "div": {
+            "value": 1,
+            "weight": 1,
+            "evidence": [
+              "divergence"
+            ]
+          }
+        },
+        "band": "out",
+        "urgency": {
+          "value": null,
+          "reason": "f_fresh needs the time of the last OBSERVED signal at the node, which the card does not carry"
+        },
+        "priorsVersion": "sniper-architecture-priors-2026-10-08"
+      }
+    },
+    "incidentCard": {
+      "kind": "incident",
+      "id": "trace-1:b2",
+      "at": "2026-11-18T11:59:04.000Z",
+      "incidentKind": "exception",
+      "service": "orders",
+      "affectedNode": "service:orders",
+      "message": "Cannot read properties of undefined (reading 'map')",
+      "exceptionType": "TypeError",
+      "httpStatusCode": 500,
+      "traceId": "trace-1",
+      "spanId": "b2",
+      "locus": null,
+      "rootCause": {
+        "node": "service:orders",
+        "classification": "primary-failure",
+        "reason": "orders: Cannot read properties of undefined (reading 'map') (1 recorded incident)",
+        "confidence": 0.6,
+        "fix": "Inspect orders's handler for /checkout",
+        "chain": [
+          {
+            "node": "service:orders",
+            "grain": "service",
+            "provenance": "INFERRED"
+          }
+        ]
+      },
+      "rankedCandidates": [
+        {
+          "node": "service:orders",
+          "classification": "cause",
+          "onset": "new",
+          "evidence": [
+            "divergence: service:orders → service:billing",
+            "divergence: service:search → service:orders",
+            "1 incident, latest: Cannot read properties of undefined (reading 'map')"
+          ]
+        },
+        {
+          "node": "service:search",
+          "classification": "on-path",
+          "evidence": [
+            "divergence: service:search → service:orders"
+          ]
+        }
+      ],
+      "blastRadius": {
+        "totalAffected": 2,
+        "nearest": [
+          {
+            "node": "service:search",
+            "distance": 1,
+            "provenance": "OBSERVED"
+          },
+          {
+            "node": "service:web",
+            "distance": 1,
+            "provenance": "OBSERVED"
+          }
+        ]
+      },
+      "policies": [
+        {
+          "policyName": "calls into billing must be observed",
+          "severity": "error",
+          "message": "this node sits on a CALLS edge to service:billing, which must carry undefined provenance",
+          "onViolation": "alert"
+        }
+      ],
+      "divergence": [
+        {
+          "type": "missing-observed",
+          "summary": "service:orders → service:billing"
+        },
+        {
+          "type": "missing-extracted",
+          "summary": "service:search → service:orders"
+        }
+      ],
+      "headline": "SERVICE orders raised TypeError at 2026-11-18T11:59:04.000Z",
+      "grade": {
+        "G": 0,
+        "gamma": 0,
+        "gates": {
+          "policyNotBlock": {
+            "passed": true,
+            "evidence": [
+              "policies[].onViolation"
+            ]
+          },
+          "notSymptomOnly": {
+            "passed": true,
+            "evidence": [
+              "rootCause.classification"
+            ]
+          },
+          "locusResolves": {
+            "passed": false,
+            "evidence": [
+              "locus"
+            ]
+          }
+        },
+        "C": 0.7143,
+        "factors": {
+          "evidence": {
+            "value": 0.4,
+            "weight": 3,
+            "evidence": [
+              "rootCause.chain[].provenance"
+            ]
+          },
+          "locus": {
+            "value": null,
+            "weight": 2,
+            "evidence": [
+              "locus"
+            ],
+            "reason": "no locus on the card (the locus gate fails)"
+          },
+          "tests": {
+            "value": null,
+            "weight": 2,
+            "evidence": [],
+            "reason": "the card carries no test-file classification or test-to-symbol edges"
+          },
+          "reach": {
+            "value": 0.96,
+            "weight": 1.5,
+            "evidence": [
+              "blastRadius.totalAffected"
+            ],
+            "reason": "nodes in the blast radius against a prior bound of 50"
+          },
+          "kind": {
+            "value": 1,
+            "weight": 1.5,
+            "evidence": [
+              "incidentKind",
+              "exceptionType",
+              "message"
+            ]
+          },
+          "chain": {
+            "value": 1,
+            "weight": 1,
+            "evidence": [
+              "rootCause.chain"
+            ]
+          },
+          "recur": {
+            "value": 0.2891,
+            "weight": 1,
+            "evidence": [
+              "count"
+            ],
+            "reason": "no coalesced count; one recorded occurrence"
+          },
+          "div": {
+            "value": 1,
+            "weight": 1,
+            "evidence": [
+              "divergence"
+            ]
+          }
+        },
+        "band": "out",
+        "urgency": {
+          "value": null,
+          "reason": "f_fresh needs the time of the last OBSERVED signal at the node, which the card does not carry"
+        },
+        "priorsVersion": "sniper-architecture-priors-2026-10-08"
+      }
+    }
+  },
+  "production": {
+    "nodes": {
+      "service:web": {
+        "id": "service:web",
+        "type": "ServiceNode",
+        "name": "web",
+        "language": "javascript"
+      },
+      "service:orders": {
+        "id": "service:orders",
+        "type": "ServiceNode",
+        "name": "orders",
+        "language": "javascript"
+      },
+      "service:billing": {
+        "id": "service:billing",
+        "type": "ServiceNode",
+        "name": "billing",
+        "language": "javascript"
+      },
+      "database:postgresql:orders-db": {
+        "id": "database:postgresql:orders-db",
+        "type": "DatabaseNode",
+        "name": "orders",
+        "engine": "postgresql",
+        "engineVersion": "15",
+        "compatibleDrivers": []
+      },
+      "service:search:production": {
+        "id": "service:search:production",
+        "type": "ServiceNode",
+        "name": "search",
+        "language": "unknown",
+        "discoveredVia": "otel",
+        "env": "production"
+      }
+    },
+    "edges": {
+      "CALLS:service:web->service:orders": {
+        "id": "CALLS:service:web->service:orders",
+        "source": "service:web",
+        "target": "service:orders",
+        "type": "CALLS",
+        "provenance": "EXTRACTED",
+        "confidence": 0.85
+      },
+      "CONNECTS_TO:service:orders->database:postgresql:orders-db": {
+        "id": "CONNECTS_TO:service:orders->database:postgresql:orders-db",
+        "source": "service:orders",
+        "target": "database:postgresql:orders-db",
+        "type": "CONNECTS_TO",
+        "provenance": "EXTRACTED",
+        "confidence": 0.85
+      },
+      "CALLS:service:orders->service:billing": {
+        "id": "CALLS:service:orders->service:billing",
+        "source": "service:orders",
+        "target": "service:billing",
+        "type": "CALLS",
+        "provenance": "EXTRACTED",
+        "confidence": 0.85
+      },
+      "CALLS:OBSERVED:service:web->service:orders": {
+        "id": "CALLS:OBSERVED:service:web->service:orders",
+        "source": "service:web",
+        "target": "service:orders",
+        "type": "CALLS",
+        "provenance": "OBSERVED",
+        "confidence": 0.378,
+        "lastObserved": "2026-11-18T11:59:04.000Z",
+        "callCount": 3,
+        "signal": {
+          "spanCount": 3,
+          "errorCount": 1,
+          "lastObservedAgeMs": 0,
+          "latencyHist": {
+            "229": 1,
+            "239": 1
+          },
+          "latencyMs": {
+            "p50": 20.5,
+            "p95": 30.5
+          },
+          "lastError": {
+            "exceptionType": "TypeError",
+            "message": "Cannot read properties of undefined (reading 'map')",
+            "httpStatusCode": 500,
+            "at": "2026-11-18T11:59:04.000Z"
+          }
+        },
+        "grain": "service"
+      },
+      "CONNECTS_TO:OBSERVED:service:orders->database:postgresql:orders-db": {
+        "id": "CONNECTS_TO:OBSERVED:service:orders->database:postgresql:orders-db",
+        "source": "service:orders",
+        "target": "database:postgresql:orders-db",
+        "type": "CONNECTS_TO",
+        "provenance": "OBSERVED",
+        "confidence": 0.4,
+        "lastObserved": "2026-11-18T11:59:03.000Z",
+        "callCount": 1,
+        "signal": {
+          "spanCount": 1,
+          "errorCount": 0,
+          "lastObservedAgeMs": 0
+        },
+        "grain": "service"
+      },
+      "CALLS:INFERRED:service:orders->service:billing": {
+        "id": "CALLS:INFERRED:service:orders->service:billing",
+        "source": "service:orders",
+        "target": "service:billing",
+        "type": "CALLS",
+        "provenance": "INFERRED",
+        "confidence": 0.6,
+        "lastObserved": "2026-11-18T11:59:04.000Z"
+      },
+      "CALLS:OBSERVED:service:search:production->service:orders": {
+        "id": "CALLS:OBSERVED:service:search:production->service:orders",
+        "source": "service:search:production",
+        "target": "service:orders",
+        "type": "CALLS",
+        "provenance": "OBSERVED",
+        "confidence": 0.4,
+        "lastObserved": "2026-11-18T11:59:05.000Z",
+        "callCount": 1,
+        "signal": {
+          "spanCount": 1,
+          "errorCount": 0,
+          "lastObservedAgeMs": 0
+        },
+        "grain": "service"
+      }
+    },
+    "incidents": [
+      {
+        "id": "trace-1:b2",
+        "timestamp": "2026-11-18T11:59:04.000Z",
+        "service": "orders",
+        "traceId": "trace-1",
+        "spanId": "b2",
+        "errorMessage": "Cannot read properties of undefined (reading 'map')",
+        "exceptionType": "TypeError",
+        "httpStatusCode": 500,
+        "attributes": {
+          "http.method": "POST",
+          "http.route": "/checkout",
+          "http.response.status_code": 500
+        },
+        "affectedNode": "service:orders"
+      }
+    ],
+    "divergences": {
+      "divergences": [
+        {
+          "type": "missing-observed",
+          "source": "service:orders",
+          "target": "service:billing",
+          "confidence": 0.85,
+          "reason": "Code declares service:orders → service:billing (CALLS) but no production traffic has been observed for this edge.",
+          "recommendation": "Verify the code path is exercised in production; check feature flags or conditional branches that might gate the call.",
+          "edgeType": "CALLS",
+          "extracted": {
+            "id": "CALLS:service:orders->service:billing",
+            "source": "service:orders",
+            "target": "service:billing",
+            "type": "CALLS",
+            "provenance": "EXTRACTED",
+            "confidence": 0.85
+          }
+        },
+        {
+          "type": "missing-extracted",
+          "source": "service:search:production",
+          "target": "service:orders",
+          "confidence": 0.4,
+          "reason": "Production observed service:search:production → service:orders (CALLS) but static analysis did not surface this edge.",
+          "recommendation": "Likely dynamic dispatch, reflection, or a coverage gap in tree-sitter extraction. Consider an `aliases` entry on the source service or file an extractor issue.",
+          "edgeType": "CALLS",
+          "observed": {
+            "id": "CALLS:OBSERVED:service:search:production->service:orders",
+            "source": "service:search:production",
+            "target": "service:orders",
+            "type": "CALLS",
+            "provenance": "OBSERVED",
+            "confidence": 0.4,
+            "lastObserved": "2026-11-18T11:59:05.000Z",
+            "callCount": 1,
+            "signal": {
+              "spanCount": 1,
+              "errorCount": 0,
+              "lastObservedAgeMs": 0
+            },
+            "grain": "service"
+          }
+        }
+      ],
+      "totalAffected": 2,
+      "computedAt": "2026-11-18T12:00:00.000Z",
+      "observedEdges": 3
+    },
+    "rootCause": {
+      "rootCauseNode": "service:orders",
+      "rootCauseReason": "orders: Cannot read properties of undefined (reading 'map') (1 recorded incident)",
+      "traversalPath": [
+        "service:orders"
+      ],
+      "edgeProvenances": [],
+      "confidence": 0.6,
+      "fixRecommendation": "Inspect orders's handler for /checkout",
+      "candidates": [
+        {
+          "node": "service:orders",
+          "classification": "primary-failure",
+          "reason": "orders: Cannot read properties of undefined (reading 'map') (1 recorded incident)",
+          "context": {
+            "errorsEmittedHere": 1,
+            "errorsFromCallers": 1,
+            "callCount": 4,
+            "outboundVolume": 1,
+            "lastObservedAgeMs": 55000,
+            "latencyP95Ms": 30.5,
+            "stale": false,
+            "boundaryTimeout": false,
+            "observedErroringDownstream": false,
+            "hasOutboundDeps": true
+          },
+          "confidence": 0.6
+        }
+      ]
+    },
+    "blastRadius": {
+      "origin": "database:postgresql:orders-db",
+      "affectedNodes": [
+        {
+          "nodeId": "service:orders",
+          "distance": 1,
+          "edgeProvenance": "OBSERVED",
+          "path": [
+            "database:postgresql:orders-db",
+            "service:orders"
+          ],
+          "confidence": 0.6003433318879937
+        },
+        {
+          "nodeId": "service:search:production",
+          "distance": 2,
+          "edgeProvenance": "OBSERVED",
+          "path": [
+            "database:postgresql:orders-db",
+            "service:orders",
+            "service:search:production"
+          ],
+          "confidence": 0.3604121161423778
+        },
+        {
+          "nodeId": "service:web",
+          "distance": 2,
+          "edgeProvenance": "OBSERVED",
+          "path": [
+            "database:postgresql:orders-db",
+            "service:orders",
+            "service:web"
+          ],
+          "confidence": 0.224348035381738
+        }
+      ],
+      "totalAffected": 3
+    },
+    "dependencies": {
+      "origin": "service:web",
+      "depth": 3,
+      "dependencies": [
+        {
+          "nodeId": "service:orders",
+          "distance": 1,
+          "edgeType": "CALLS",
+          "provenance": "OBSERVED"
+        },
+        {
+          "nodeId": "database:postgresql:orders-db",
+          "distance": 2,
+          "edgeType": "CONNECTS_TO",
+          "provenance": "OBSERVED"
+        },
+        {
+          "nodeId": "service:billing",
+          "distance": 2,
+          "edgeType": "CALLS",
+          "provenance": "INFERRED"
+        }
+      ],
+      "total": 3
+    },
+    "observedDependencies": {
+      "origin": "service:web",
+      "dependencies": [
+        {
+          "id": "CALLS:OBSERVED:service:web->service:orders",
+          "source": "service:web",
+          "target": "service:orders",
+          "type": "CALLS",
+          "provenance": "OBSERVED",
+          "confidence": 0.378,
+          "lastObserved": "2026-11-18T11:59:04.000Z",
+          "callCount": 3,
+          "signal": {
+            "spanCount": 3,
+            "errorCount": 1,
+            "lastObservedAgeMs": 0,
+            "latencyMs": {
+              "p50": 20.5,
+              "p95": 30.5
+            },
+            "latencyHist": {
+              "229": 1,
+              "239": 1
+            },
+            "lastError": {
+              "exceptionType": "TypeError",
+              "message": "Cannot read properties of undefined (reading 'map')",
+              "at": "2026-11-18T11:59:04.000Z",
+              "httpStatusCode": 500
+            }
+          },
+          "grain": "service"
+        }
+      ],
+      "observed": true,
+      "inboundObservedCount": 0,
+      "hasExtractedOutbound": true,
+      "inboundVolume": 0,
+      "window": "lifetime"
+    },
+    "policyViolations": [
+      {
+        "id": "calls-into-billing-observed:CALLS:service:orders->service:billing",
+        "policyId": "calls-into-billing-observed",
+        "policyName": "calls into billing must be observed",
+        "severity": "error",
+        "onViolation": "alert",
+        "ruleType": "provenance",
+        "subject": {
+          "edgeId": "CALLS:service:orders->service:billing"
+        },
+        "message": "CALLS edge CALLS:service:orders->service:billing has provenance EXTRACTED; required ",
+        "observedAt": "2026-11-18T12:00:00.000Z"
+      },
+      {
+        "id": "calls-into-billing-observed:CALLS:INFERRED:service:orders->service:billing",
+        "policyId": "calls-into-billing-observed",
+        "policyName": "calls into billing must be observed",
+        "severity": "error",
+        "onViolation": "alert",
+        "ruleType": "provenance",
+        "subject": {
+          "edgeId": "CALLS:INFERRED:service:orders->service:billing"
+        },
+        "message": "CALLS edge CALLS:INFERRED:service:orders->service:billing has provenance INFERRED; required ",
+        "observedAt": "2026-11-18T12:00:00.000Z"
+      }
+    ],
+    "nodeCard": {
+      "kind": "incident",
+      "id": null,
+      "at": null,
+      "incidentKind": null,
+      "service": "orders",
+      "affectedNode": "service:orders",
+      "message": null,
+      "noIncident": {
+        "reason": "composed from the graph; no recorded incident for this node, so the fields only an incident supplies (id, at, incidentKind, message) are null"
+      },
+      "locus": null,
+      "rootCause": {
+        "node": "service:orders",
+        "classification": "primary-failure",
+        "reason": "orders: Cannot read properties of undefined (reading 'map') (1 recorded incident)",
+        "confidence": 0.6,
+        "fix": "Inspect orders's handler for /checkout",
+        "chain": [
+          {
+            "node": "service:orders",
+            "grain": "service",
+            "provenance": "INFERRED"
+          }
+        ]
+      },
+      "rankedCandidates": [
+        {
+          "node": "service:orders",
+          "classification": "cause",
+          "onset": "new",
+          "evidence": [
+            "divergence: service:orders → service:billing",
+            "divergence: service:search:production → service:orders",
+            "1 incident, latest: Cannot read properties of undefined (reading 'map')"
+          ]
+        },
+        {
+          "node": "service:search:production",
+          "classification": "on-path",
+          "evidence": [
+            "divergence: service:search:production → service:orders"
+          ]
+        }
+      ],
+      "blastRadius": {
+        "totalAffected": 2,
+        "nearest": [
+          {
+            "node": "service:search:production",
+            "distance": 1,
+            "provenance": "OBSERVED"
+          },
+          {
+            "node": "service:web",
+            "distance": 1,
+            "provenance": "OBSERVED"
+          }
+        ]
+      },
+      "policies": [
+        {
+          "policyName": "calls into billing must be observed",
+          "severity": "error",
+          "message": "this node sits on a CALLS edge to service:billing, which must carry undefined provenance",
+          "onViolation": "alert"
+        }
+      ],
+      "divergence": [
+        {
+          "type": "missing-observed",
+          "summary": "service:orders → service:billing"
+        },
+        {
+          "type": "missing-extracted",
+          "summary": "service:search:production → service:orders"
+        }
+      ],
+      "headline": "SERVICE orders has no recorded incident",
+      "grade": {
+        "G": 0,
+        "gamma": 0,
+        "gates": {
+          "policyNotBlock": {
+            "passed": true,
+            "evidence": [
+              "policies[].onViolation"
+            ]
+          },
+          "notSymptomOnly": {
+            "passed": true,
+            "evidence": [
+              "rootCause.classification"
+            ]
+          },
+          "locusResolves": {
+            "passed": false,
+            "evidence": [
+              "locus"
+            ]
+          }
+        },
+        "C": 0.7138,
+        "factors": {
+          "evidence": {
+            "value": 0.4,
+            "weight": 3,
+            "evidence": [
+              "rootCause.chain[].provenance"
+            ]
+          },
+          "locus": {
+            "value": null,
+            "weight": 2,
+            "evidence": [
+              "locus"
+            ],
+            "reason": "no locus on the card (the locus gate fails)"
+          },
+          "tests": {
+            "value": null,
+            "weight": 2,
+            "evidence": [],
+            "reason": "the card carries no test-file classification or test-to-symbol edges"
+          },
+          "reach": {
+            "value": 0.96,
+            "weight": 1.5,
+            "evidence": [
+              "blastRadius.totalAffected"
+            ],
+            "reason": "nodes in the blast radius against a prior bound of 50"
+          },
+          "kind": {
+            "value": null,
+            "weight": 1.5,
+            "evidence": [
+              "incidentKind",
+              "exceptionType",
+              "message"
+            ],
+            "reason": "no incident on the card"
+          },
+          "chain": {
+            "value": 1,
+            "weight": 1,
+            "evidence": [
+              "rootCause.chain"
+            ]
+          },
+          "recur": {
+            "value": null,
+            "weight": 1,
+            "evidence": [
+              "count"
+            ],
+            "reason": "no incident on the card"
+          },
+          "div": {
+            "value": 1,
+            "weight": 1,
+            "evidence": [
+              "divergence"
+            ]
+          }
+        },
+        "band": "out",
+        "urgency": {
+          "value": null,
+          "reason": "f_fresh needs the time of the last OBSERVED signal at the node, which the card does not carry"
+        },
+        "priorsVersion": "sniper-architecture-priors-2026-10-08"
+      }
+    },
+    "incidentCard": {
+      "kind": "incident",
+      "id": "trace-1:b2",
+      "at": "2026-11-18T11:59:04.000Z",
+      "incidentKind": "exception",
+      "service": "orders",
+      "affectedNode": "service:orders",
+      "message": "Cannot read properties of undefined (reading 'map')",
+      "exceptionType": "TypeError",
+      "httpStatusCode": 500,
+      "traceId": "trace-1",
+      "spanId": "b2",
+      "locus": null,
+      "rootCause": {
+        "node": "service:orders",
+        "classification": "primary-failure",
+        "reason": "orders: Cannot read properties of undefined (reading 'map') (1 recorded incident)",
+        "confidence": 0.6,
+        "fix": "Inspect orders's handler for /checkout",
+        "chain": [
+          {
+            "node": "service:orders",
+            "grain": "service",
+            "provenance": "INFERRED"
+          }
+        ]
+      },
+      "rankedCandidates": [
+        {
+          "node": "service:orders",
+          "classification": "cause",
+          "onset": "new",
+          "evidence": [
+            "divergence: service:orders → service:billing",
+            "divergence: service:search:production → service:orders",
+            "1 incident, latest: Cannot read properties of undefined (reading 'map')"
+          ]
+        },
+        {
+          "node": "service:search:production",
+          "classification": "on-path",
+          "evidence": [
+            "divergence: service:search:production → service:orders"
+          ]
+        }
+      ],
+      "blastRadius": {
+        "totalAffected": 2,
+        "nearest": [
+          {
+            "node": "service:search:production",
+            "distance": 1,
+            "provenance": "OBSERVED"
+          },
+          {
+            "node": "service:web",
+            "distance": 1,
+            "provenance": "OBSERVED"
+          }
+        ]
+      },
+      "policies": [
+        {
+          "policyName": "calls into billing must be observed",
+          "severity": "error",
+          "message": "this node sits on a CALLS edge to service:billing, which must carry undefined provenance",
+          "onViolation": "alert"
+        }
+      ],
+      "divergence": [
+        {
+          "type": "missing-observed",
+          "summary": "service:orders → service:billing"
+        },
+        {
+          "type": "missing-extracted",
+          "summary": "service:search:production → service:orders"
+        }
+      ],
+      "headline": "SERVICE orders raised TypeError at 2026-11-18T11:59:04.000Z",
+      "grade": {
+        "G": 0,
+        "gamma": 0,
+        "gates": {
+          "policyNotBlock": {
+            "passed": true,
+            "evidence": [
+              "policies[].onViolation"
+            ]
+          },
+          "notSymptomOnly": {
+            "passed": true,
+            "evidence": [
+              "rootCause.classification"
+            ]
+          },
+          "locusResolves": {
+            "passed": false,
+            "evidence": [
+              "locus"
+            ]
+          }
+        },
+        "C": 0.7143,
+        "factors": {
+          "evidence": {
+            "value": 0.4,
+            "weight": 3,
+            "evidence": [
+              "rootCause.chain[].provenance"
+            ]
+          },
+          "locus": {
+            "value": null,
+            "weight": 2,
+            "evidence": [
+              "locus"
+            ],
+            "reason": "no locus on the card (the locus gate fails)"
+          },
+          "tests": {
+            "value": null,
+            "weight": 2,
+            "evidence": [],
+            "reason": "the card carries no test-file classification or test-to-symbol edges"
+          },
+          "reach": {
+            "value": 0.96,
+            "weight": 1.5,
+            "evidence": [
+              "blastRadius.totalAffected"
+            ],
+            "reason": "nodes in the blast radius against a prior bound of 50"
+          },
+          "kind": {
+            "value": 1,
+            "weight": 1.5,
+            "evidence": [
+              "incidentKind",
+              "exceptionType",
+              "message"
+            ]
+          },
+          "chain": {
+            "value": 1,
+            "weight": 1,
+            "evidence": [
+              "rootCause.chain"
+            ]
+          },
+          "recur": {
+            "value": 0.2891,
+            "weight": 1,
+            "evidence": [
+              "count"
+            ],
+            "reason": "no coalesced count; one recorded occurrence"
+          },
+          "div": {
+            "value": 1,
+            "weight": 1,
+            "evidence": [
+              "divergence"
+            ]
+          }
+        },
+        "band": "out",
+        "urgency": {
+          "value": null,
+          "reason": "f_fresh needs the time of the last OBSERVED signal at the node, which the card does not carry"
+        },
+        "priorsVersion": "sniper-architecture-priors-2026-10-08"
+      }
+    }
+  }
+}

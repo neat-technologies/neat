@@ -1,11 +1,11 @@
 import {
   Provenance,
   frontierEdgeId,
-  observedEdgeId,
   type EdgeTypeValue,
   type GraphEdge,
 } from '@neat.is/types'
 import type { NeatGraph } from '../graph.js'
+import { hasObservedEdge } from './edges.js'
 
 // FRONTIER surface edges (ADR-226): the one writer of a FRONTIER edge and its
 // promotion when the OBSERVED twin arrives. Moved out of ingest.ts so other
@@ -31,7 +31,7 @@ export function stageFrontierEdge(
   type: EdgeTypeValue,
 ): boolean {
   if (!graph.hasNode(source) || !graph.hasNode(target)) return false
-  if (graph.hasEdge(observedEdgeId(source, target, type))) return false
+  if (hasObservedEdge(graph, source, target, type)) return false
   const key = frontierEdgeId(source, target, type)
   if (graph.hasEdge(key)) return false
   graph.addEdgeWithKey(key, source, target, {
@@ -49,7 +49,7 @@ export function promoteFrontierEdges(graph: NeatGraph): number {
   graph.forEachEdge((edgeId, attrs) => {
     const e = attrs as GraphEdge
     if (e.provenance !== Provenance.FRONTIER) return
-    if (graph.hasEdge(observedEdgeId(e.source, e.target, e.type))) {
+    if (hasObservedEdge(graph, e.source, e.target, e.type)) {
       graduated.push(edgeId)
     }
   })

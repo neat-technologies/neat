@@ -4,7 +4,7 @@ description: Snapshot at <projectDir>/neat-out/graph.json. SCHEMA_VERSION bumps 
 governs:
   - "packages/core/src/persist.ts"
   - "packages/core/src/healthy-baseline.ts"
-adr: [ADR-041, ADR-017, ADR-019, ADR-026, ADR-031, ADR-068, ADR-074, ADR-270]
+adr: [ADR-041, ADR-017, ADR-019, ADR-026, ADR-031, ADR-068, ADR-074, ADR-270, ADR-280]
 enforcement: [lint, review]
 ---
 
@@ -20,7 +20,7 @@ Named projects: `~/.neat/projects/<name>/graph.json` per ADR-026.
 
 ## Schema versioning
 
-`SCHEMA_VERSION = 10` today. Migration chain:
+`SCHEMA_VERSION = 11` today. Migration chain:
 
 - **v1 → v2** removed `pgDriverVersion` from ServiceNode (ADR-019); compat traversal reads `dependencies[driver]` instead.
 - **v2 → v3** narrowed the provenance enum to four settled values (ADR-068); any edge still carrying the pre-v0.3.5 `FRONTIER` provenance literal is rewritten to OBSERVED on load and re-keyed to the OBSERVED edge-id wire format.
@@ -31,6 +31,7 @@ Named projects: `~/.neat/projects/<name>/graph.json` per ADR-026.
 - **v7 → v8** added `DependencyNode` to the node union and the optional `dependency` facts on an edge (ADR-274); the v8 wire format is a superset of v7, so `migrateV7ToV8` is a version-only bump. An older snapshot carries no dependencies, and the next extract pass mints them from the lockfile.
 - **v8 → v9** keyed a networked DatabaseNode on engine and host (ADR-276). `migrateV8ToV9` re-keys every `database:<host>` node to `database:<engine>:<host>` and re-points its edges.
 - **v9 → v10** added `declaredBy` to every static node and EXTRACTED edge (#1729, #1698 slice zero). `migrateV9ToV10` seeds each FileNode's `declaredBy` from its ADR-233 `source`, the one owner a v9 snapshot records. Every other element's declarers stay absent, which reads as unknown, until the next pass that names a source stamps them.
+- **v10 → v11** put the environment on runtime evidence instead of on a service's identity (ADR-280). `migrateV10ToV11` folds each env-tagged OTel ServiceNode twin into the extracted ServiceNode of the same name (case-insensitive), re-pointing its OBSERVED, INFERRED and STALE edges and re-keying them with the twin's normalised environment (`OBSERVED@<env>`), merging into an edge already at that id (counters add, the later `lastObserved` wins). An OTel-only ServiceNode whose `env` is not normalised moves to its normalised id. Every other edge keeps its id: an OBSERVED edge with no environment is already the `unknown` edge. Idempotent. Incidents are not rewritten; one with no `env` reads as `unknown` ([env-dimension.md](./env-dimension.md) §5).
 
 **Schema growth (ADR-031) does not bump the version.** Adding optional fields → snapshot regenerates, version stays. Only **shape changes** bump the version. Each shape change adds a `migrate_vN_to_vN+1` function and bumps the constant.
 

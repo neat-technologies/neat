@@ -1,3 +1,6 @@
+import { ENV_UNKNOWN } from '@neat.is/types'
+import { runtimeEnvironments } from './runtime-env.js'
+import { staticView, viewForEnvironment } from './runtime-view.js'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type {
@@ -453,16 +456,77 @@ export function canPromoteFrontier(
   return { allowed: blocking.length === 0, violations: blocking }
 }
 
-export function evaluateAllPolicies(
-  graph: NeatGraph,
-  policies: Policy[],
-  ctx: EvaluationContext,
-): PolicyViolation[] {
+function evaluateOn(graph: NeatGraph, policies: Policy[], ctx: EvaluationContext): PolicyViolation[] {
   const out: PolicyViolation[] = []
   for (const policy of policies) {
     const evaluator = policyEvaluators[policy.rule.type] as RuleEvaluator
     const violations = evaluator({ graph, policy, rule: policy.rule, ctx })
     for (const v of violations) out.push(v)
+  }
+  return out
+}
+
+/**
+ * Which environments a policy evaluation covers (ADR-280 decision 7). `all`
+ * (the default) evaluates every environment present, as the violations ledger,
+ * watch and the graduation gate need. `{ env }` answers for one environment, as
+ * a read that resolved its environment does.
+ */
+export type PolicyEnvironmentScope = 'all' | { env: string }
+
+/**
+ * Evaluate every policy. One set of policies, checked against each environment
+ * separately (ADR-280 decision 7): a policy is evaluated once on the graph with
+ * no runtime edges and once per environment on the graph with only that
+ * environment's runtime edges. A violation every environment shares with the
+ * static evaluation is static structure and is reported once, with no
+ * environment. Any other violation names the environment it came from, and
+ * when the graph holds more than one environment its id is qualified with it
+ * (`<id>@<env>`) unless it already names it through an edge id, so two
+ * environments never share an id in the ledger. A graph whose runtime evidence
+ * is all `unknown` (or that has none) is evaluated as it always was.
+ */
+export function evaluateAllPolicies(
+  graph: NeatGraph,
+  policies: Policy[],
+  ctx: EvaluationContext,
+  scope: PolicyEnvironmentScope = 'all',
+): PolicyViolation[] {
+  if (policies.length === 0) return []
+  const present = runtimeEnvironments(graph)
+  const named = present.filter((e) => e !== ENV_UNKNOWN)
+  if (named.length === 0 && (scope === 'all' || scope.env === ENV_UNKNOWN)) return evaluateOn(graph, policies, ctx)
+
+  const envs = scope === 'all' ? present : [scope.env]
+  const several = present.length > 1
+  const key = (v: PolicyViolation) => JSON.stringify(v)
+  const fromStatic = new Map(evaluateOn(staticView(graph), policies, ctx).map((v) => [v.id, key(v)]))
+  const perEnv = envs.map((env) => ({
+    env,
+    violations: evaluateOn(present.length === 1 && env === present[0] ? graph : viewForEnvironment(graph, env), policies, ctx),
+  }))
+  // Static: produced identically by the static evaluation and by every environment evaluated.
+  const shared = (v: PolicyViolation) =>
+    fromStatic.get(v.id) === key(v) && perEnv.every((p) => p.violations.some((w) => w.id === v.id && key(w) === key(v)))
+
+  const out: PolicyViolation[] = []
+  const emitted = new Set<string>()
+  for (const { env, violations } of perEnv) {
+    for (const v of violations) {
+      if (shared(v)) {
+        if (!emitted.has(v.id)) {
+          emitted.add(v.id)
+          out.push(v)
+        }
+        continue
+      }
+      if (env === ENV_UNKNOWN) {
+        out.push(v)
+        continue
+      }
+      const id = several && !v.id.includes(`@${env}:`) ? `${v.id}@${env}` : v.id
+      out.push({ ...v, id, env })
+    }
   }
   return out
 }

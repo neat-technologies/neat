@@ -42,6 +42,8 @@ export function recordFlagEvaluation(
   ev: FlagEvaluation,
   ts: string,
   callSiteEvidence: { file: string; line?: number } | undefined,
+  // The span's environment (ADR-280): the evaluation edge is that environment's evidence.
+  env?: string,
 ): boolean {
   if (!ev.variant) return false
   const storeId = flagStoreFor(graph, ev.provider)
@@ -50,7 +52,7 @@ export function recordFlagEvaluation(
   const flags = foldObservedVariant(node.flags, ev.key, ev.variant, ev.reason, ts)
   if (!flags) return false
   graph.mergeNodeAttributes(storeId, { flags })
-  upsertObservedEdge(graph, EdgeType.CONNECTS_TO, source(), storeId, ts, false, callSiteEvidence)
+  upsertObservedEdge(graph, EdgeType.CONNECTS_TO, source(), storeId, ts, false, callSiteEvidence, undefined, undefined, env)
   return true
 }
 
@@ -59,6 +61,6 @@ export function recordSpanFlagEvaluations(s: SpanIngest): void {
   const { ctx, span, ts, callSiteEvidence, observedSource } = s
   // for the flag grain, beside the store's own sync reader.
   for (const ev of span.flagEvaluations ?? []) {
-    recordFlagEvaluation(ctx.graph, observedSource, ev, ts, callSiteEvidence)
+    recordFlagEvaluation(ctx.graph, observedSource, ev, ts, callSiteEvidence, s.env)
   }
 }

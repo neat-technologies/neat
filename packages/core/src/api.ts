@@ -1,3 +1,5 @@
+import { EnvironmentRequiredError, envField, resolveEnvironment } from './runtime-env.js'
+import { readProductionEnv } from './project-environments.js'
 import path from 'node:path'
 import Fastify, {
   type FastifyInstance,
@@ -356,6 +358,12 @@ function resolveRead(
   return { graph: view.graph, view }
 }
 
+// A read that names no environment on a project with several, none of them its
+// production one (ADR-280 decision 4): refused with the environments it could name.
+function refuseEnvironment(reply: FastifyReply, err: EnvironmentRequiredError) {
+  return reply.code(409).send({ error: err.message, code: err.code, environments: err.environments })
+}
+
 // Every answer from a view carries its `ref` block (ref-views.md §5.3).
 function withRef<T extends object>(read: ReadTarget, body: T): T & { ref?: RefBlock } {
   return read.view ? { ...body, ref: read.view.ref } : body
@@ -616,7 +624,15 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
       if (!proj.graph.hasNode(nodeId)) {
         return reply.code(404).send({ error: 'node not found', id: nodeId })
       }
-      return getObservedDependencies(proj.graph, nodeId)
+      // The answer is for one environment (ADR-280): the project's production
+      // environment, else the only one present. Several, none of them production,
+      // is refused with the list rather than answered for all of them at once.
+      try {
+        return getObservedDependencies(proj.graph, nodeId, { productionEnv: await readProductionEnv(proj.scanPath) })
+      } catch (err) {
+        if (err instanceof EnvironmentRequiredError) return refuseEnvironment(reply, err)
+        throw err
+      }
     },
   )
 
@@ -1584,23 +1600,29 @@ function registerRoutes(scope: FastifyInstance, ctx: RouteContext): void {
     // With a hypothetical → simulate the action against a deep-copy graph
     // (avoids mutation authority concerns), evaluate, return the delta.
     const evalCtx = { now: () => Date.now() }
+    // One set of policies, checked for one environment (ADR-280 decision 7): the
+    // project's production environment, else the only one present.
+    const resolved = resolveEnvironment(read.graph, { productionEnv: await readProductionEnv(proj.scanPath) })
+    if ('refused' in resolved) return refuseEnvironment(reply, new EnvironmentRequiredError(resolved.environments))
+    const scope = { env: resolved.env }
     if (!parsed.data.hypotheticalAction) {
-      const violations = evaluateAllPolicies(read.graph, policies, evalCtx)
+      const violations = evaluateAllPolicies(read.graph, policies, evalCtx, scope)
       const blocking = violations.filter((v) => v.onViolation === 'block')
-      return withRef(read, { allowed: blocking.length === 0, violations })
+      return withRef(read, { allowed: blocking.length === 0, violations, ...envField(resolved.env) })
     }
 
     // For now the dry-run simulation re-uses evaluateAllPolicies on the
     // current graph. Full hypothetical simulation (e.g. "what if I added
     // this OBSERVED edge?") is the v0.2.4-δ scope; #117 ships the surface,
     // #118 fills in the action shapes' simulation logic.
-    const violations = evaluateAllPolicies(read.graph, policies, evalCtx)
+    const violations = evaluateAllPolicies(read.graph, policies, evalCtx, scope)
     const blocking = violations.filter((v) => v.onViolation === 'block')
     return withRef(read, {
       allowed: blocking.length === 0,
       hypotheticalAction: parsed.data.hypotheticalAction,
       violations,
-    } as { allowed: boolean; hypotheticalAction: unknown; violations: PolicyViolation[] })
+      ...envField(resolved.env),
+    } as { allowed: boolean; hypotheticalAction: unknown; violations: PolicyViolation[]; env?: string })
   })
 
   // ── /extend — surgical instrumentation tools (ADR-081, ADR-086) ─────────

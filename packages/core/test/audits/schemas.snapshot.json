@@ -159,6 +159,9 @@
                             }
                           }
                         },
+                        "env": {
+                          "_optional": "_string"
+                        },
                         "evidence": {
                           "_optional": {
                             "_object": {
@@ -379,6 +382,9 @@
                               }
                             }
                           }
+                        },
+                        "env": {
+                          "_optional": "_string"
                         },
                         "evidence": {
                           "_optional": {
@@ -635,6 +641,9 @@
                               }
                             }
                           }
+                        },
+                        "env": {
+                          "_optional": "_string"
                         },
                         "evidence": {
                           "_optional": {
@@ -917,6 +926,9 @@
                             }
                           }
                         }
+                      },
+                      "env": {
+                        "_optional": "_string"
                       },
                       "evidence": {
                         "_optional": {
@@ -1305,6 +1317,9 @@
                               }
                             }
                           }
+                        },
+                        "env": {
+                          "_optional": "_string"
                         },
                         "evidence": {
                           "_optional": {
@@ -1751,6 +1766,9 @@
                       }
                     }
                   },
+                  "env": {
+                    "_optional": "_string"
+                  },
                   "evidence": {
                     "_optional": {
                       "_object": {
@@ -1971,6 +1989,9 @@
                         }
                       }
                     }
+                  },
+                  "env": {
+                    "_optional": "_string"
                   },
                   "evidence": {
                     "_optional": {
@@ -2227,6 +2248,9 @@
                         }
                       }
                     }
+                  },
+                  "env": {
+                    "_optional": "_string"
                   },
                   "evidence": {
                     "_optional": {
@@ -2509,6 +2533,9 @@
                       }
                     }
                   }
+                },
+                "env": {
+                  "_optional": "_string"
                 },
                 "evidence": {
                   "_optional": {
@@ -2898,6 +2925,9 @@
                       }
                     }
                   },
+                  "env": {
+                    "_optional": "_string"
+                  },
                   "evidence": {
                     "_optional": {
                       "_object": {
@@ -3258,6 +3288,9 @@
           }
         }
       },
+      "env": {
+        "_optional": "_string"
+      },
       "errorMessage": "_string",
       "errorType": {
         "_optional": "_string"
@@ -3350,6 +3383,9 @@
             }
           }
         }
+      },
+      "env": {
+        "_optional": "_string"
       },
       "evidence": {
         "_optional": {
@@ -5312,6 +5348,9 @@
   },
   "PolicyViolationSchema": {
     "_object": {
+      "env": {
+        "_optional": "_string"
+      },
       "id": {
         "_string": [
           "min"

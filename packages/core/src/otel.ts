@@ -13,6 +13,7 @@ import {
   type OtlpKeyValue,
   type OtlpTracesRequest,
 } from './otlp-wire.js'
+import { normalizeEnv } from '@neat.is/types'
 import { tableFromSqlStatement, columnsFromSqlStatement } from './identity/sql-table.js'
 
 export type { OtlpTracesRequest } from './otlp-wire.js'
@@ -359,7 +360,10 @@ function pickEnv(
   for (const attrs of [spanAttrs, resourceAttrs]) {
     for (const key of [ENV_ATTR_CANONICAL, ENV_ATTR_COMPAT]) {
       const v = attrs[key]
-      if (typeof v === 'string' && v.length > 0) return v
+      // The first attribute that is set wins, normalised once here (ADR-280
+      // decision 9): a value that does not survive normalisation is `unknown`, it
+      // does not fall through to the next attribute.
+      if (typeof v === 'string' && v.length > 0) return normalizeEnv(v)
     }
   }
   return ENV_FALLBACK
