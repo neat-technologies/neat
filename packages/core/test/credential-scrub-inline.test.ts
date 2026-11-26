@@ -23,6 +23,10 @@ describe('redactSecretValues: inline credentials', () => {
     ['env fallback ??', "process.env['API_KEY'] ?? 'exampleFallbackKey'", "process.env['API_KEY'] ?? '[REDACTED]'"],
     ['python environ.get', 'os.environ.get("DB_PASSWORD", "examplePw2")', 'os.environ.get("DB_PASSWORD", "[REDACTED]")'],
     ['python getenv', "os.getenv('TOKEN', 'exampleTok3')", "os.getenv('TOKEN', '[REDACTED]')"],
+    ['upper-case name assigned an environ.get fallback', 'API_TOKEN = os.environ.get("API_TOKEN", "py-fallback-tok3n-123")', 'API_TOKEN = os.environ.get("API_TOKEN", "[REDACTED]")'],
+    ['upper-case name assigned a getenv fallback', "DB_PASSWORD = os.getenv('DB_PASSWORD', 'examplePw4')", "DB_PASSWORD = os.getenv('DB_PASSWORD', '[REDACTED]')"],
+    ['env line still redacted', 'NPM_TOKEN=exampleNpmTok3n99 npm publish', 'NPM_TOKEN=[REDACTED] npm publish'],
+    ['quoted env line still redacted', "export AWS_SECRET_ACCESS_KEY='exampleAwsSecret1'", "export AWS_SECRET_ACCESS_KEY='[REDACTED]'"],
     ['unquoted password= in a log', 'connect failed: host=db user=admin password=examplePassw0rd sslmode=require', 'connect failed: host=db user=admin password=[REDACTED] sslmode=require'],
     ['error prose', 'password authentication failed for user "admin" with password examplePassw0rd', 'password authentication failed for user "admin" with password [REDACTED]'],
   ]
@@ -51,6 +55,8 @@ describe('redactSecretValues: inline credentials', () => {
       'log in with password authentication enabled',
       'password authentication failed for user "admin"',
       'const onToken = (token) => "x"',
+      'SECRET_KEY = os.environ["SECRET_KEY"]',
+      'API_KEY = load_key()',
     ]) {
       expect(redactSecretValues(text)).toBe(text)
     }
