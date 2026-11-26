@@ -43,7 +43,7 @@ That holds at both entry points, through one function: `migrateSnapshot` runs th
 
 ## Credential scrub on load
 
-The free text an edge carries, `evidence.snippet` (a source line) and `signal.lastError.message` (a span's failure message), is scrubbed by its producer as it is written (`snippet()`, `buildEdgeErrorExemplar`). `migrateSnapshot` applies the same value redaction (`scrubEdgeText` in `credential-scrub.ts`, no second pattern set) to every edge of every snapshot it reads, so an edge written before the producers scrubbed is clean in memory after a disk load or a `POST /snapshot` push (#1759). When a disk load scrubs anything, `loadGraphFromDisk` saves the snapshot back at once so the file at rest is clean too; a clean snapshot is not rewritten. The scrub is not a shape change and does not bump `SCHEMA_VERSION`.
+The free text an edge carries, `evidence.snippet` (a source line) and `signal.lastError.message` (a span's failure message), is scrubbed by its producer as it is written (`snippet()`, `buildEdgeErrorExemplar`). `migrateSnapshot` applies the same value redaction (`scrubEdgeText` in `credential-scrub.ts`, no second pattern set) to every edge of every snapshot it reads, so an edge written before the producers scrubbed is clean in memory after a disk load or a `POST /snapshot` push (#1759). When a disk load scrubs anything, `loadGraphFromDisk` saves the snapshot back at once so the file at rest is clean too; a clean snapshot is not rewritten. The scrub is not a shape change and does not bump `SCHEMA_VERSION`. Because every pattern is idempotent and a load re-scrubs, a pattern added to `credential-scrub.ts` later (#1769) cleans snapshots already at rest on their next load, with no migration.
 
 ## Lifecycle
 
