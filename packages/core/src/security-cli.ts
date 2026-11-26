@@ -35,6 +35,7 @@ import { extractFromDirectory } from './extract.js'
 import { makeGraph } from './graph.js'
 import { scanProjectCves, type ScanOptions } from './security-scan.js'
 import { scanDiffLocal } from './security-diff.js'
+import { loadMatchedDependencyCode } from './dependency-code-loop.js'
 import { applyFixes, type DepApplyResult } from './security-apply.js'
 import { advisoryDisclosure } from './advisories/source.js'
 import { classify, humanPlan } from './security/fix-plan.js'
@@ -103,7 +104,13 @@ function toScanOpts(o: SecurityEngineOptions): ScanOptions {
 const realScan: SecurityScanFn = async (target, opts) => {
   const graph = makeGraph()
   await extractFromDirectory(graph, target, { announce: false })
-  return scanProjectCves(graph, toScanOpts(opts))
+  // The scratch graph is this run's own, so it loads the matched dependencies'
+  // code itself, the step the daemon's dependency-code loop runs, and grades as
+  // far as the daemon does (dependency-inventory.md §5).
+  return scanProjectCves(graph, {
+    ...toScanOpts(opts),
+    loadDependencyCode: (g, ids) => loadMatchedDependencyCode(g, target, ids, opts.env),
+  })
 }
 const realDiff: SecurityDiffFn = (target, refs, opts) => scanDiffLocal(target, refs, toScanOpts(opts))
 const realApply: SecurityApplyFn = (target, cards) => applyFixes(target, cards)

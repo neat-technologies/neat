@@ -35,7 +35,7 @@ A frame that lands on a changed-set symbol is recorded as such; it's the stronge
 
 **"The importing file ran" never promotes a card to `reachable-observed`.** An OBSERVED edge from a first-party symbol that imports the package goes in `supporting` as `importer-observed`, and that is all it does. It shows the importer executed, not the package.
 
-**Limits stated on the card.** `method` is `'call-graph, no dataflow'`. NEAT does not claim that untrusted input reaches the symbol. A call that doesn't go through code (a template string invoking a filter, a dynamic `require`, reflection) isn't resolved. When an import exists but no path is found, the card stays at `imported`, and `limits` names the reason where one is known.
+**Limits stated on the card.** `method` is `'call-graph, no dataflow'`. NEAT does not claim that untrusted input reaches the symbol. A call that doesn't go through code (a template string invoking a filter, a dynamic `require`, reflection) isn't resolved. When an import exists but no path is found, the card stays at `imported`, and `limits` names the reason where one is known. When the caller that loaded dependency code looked for the installed copy and found none (dependency-inventory.md §5), the limit says the package was not found installed, so a reader can tell "not installed" from "not reachable".
 
 ## 3. Grain
 
