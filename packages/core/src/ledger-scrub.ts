@@ -16,7 +16,9 @@ import { replaceLedgerViaSidecar } from './durable-incident.js'
 //
 // Version 2 extends the rewrite from incident records to every row: extraction
 // errors and any other JSON row get the same value redaction (scrubLedgerRow).
-export const LEDGER_SCRUB_VERSION = 2
+// Version 3 adds credentials written inline: unquoted keys, lower-case and
+// camelCase assignments, env-read fallbacks and error prose (#1769).
+export const LEDGER_SCRUB_VERSION = 3
 
 export function ledgerScrubMarkerPath(errorsPath: string): string {
   return `${errorsPath}.scrubbed`
