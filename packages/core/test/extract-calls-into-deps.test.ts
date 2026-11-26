@@ -112,9 +112,74 @@ describe('PackageExports', () => {
     expect([...ex.forImport('req', 'require')!]).toEqual([])
   })
 
-  it('reads nothing from a wrapped file that is not a bundle', () => {
+  it('reads a wrapped file that is not a browserify bundle as an IIFE, from its own module.exports', () => {
     const files = new Map([['index.js', '(function () { function inner() {}\nmodule.exports = inner })()\n']])
-    expect([...new PackageExports({}, files).forImport('', 'require')!]).toEqual([])
+    expect([...new PackageExports({}, files).forImport('', 'require')!]).toEqual([['default', t('index.js', 'inner')]])
+  })
+
+  // A single-file build shipped as `main` beside modular files (#1761): one
+  // IIFE, a UMD header that aliases `module`, the exported object built and
+  // returned by a local function, its members assigned as `obj.name = fn`.
+  const umd = [
+    ';(function() {',
+    "  var freeModule = typeof module == 'object' && module",
+    '  var runInContext = (function runInContext(context) {',
+    '    function template(string) { return compile(string) }',
+    '    function compile(s) { return s }',
+    '    function chunk(a) { return a }',
+    '    function lodash(value) { return value }',
+    '    lodash.template = template',
+    '    lodash.chunk = lodash.each = chunk',
+    '    lodash.inline = function inline() {}',
+    '    lodash.VERSION = "1.0.0"',
+    '    return lodash',
+    '  })',
+    '  var _ = runInContext()',
+    '  if (freeModule) { (freeModule.exports = _)._ = _ }',
+    '}.call(this))',
+    '',
+  ].join('\n')
+
+  it("reads a UMD build's members off the object its module.exports is set to", () => {
+    const ex = new PackageExports({ main: 'lodash.js' }, new Map([['lodash.js', umd]]))
+    expect([...ex.forImport('', 'require')!].map(([k, v]) => `${k}=${v.file}#${v.qualname}`)).toEqual([
+      'default=lodash.js#lodash',
+      'template=lodash.js#template',
+      'chunk=lodash.js#chunk',
+      'each=lodash.js#chunk',
+      'inline=lodash.js#lodash.inline',
+    ])
+  })
+
+  it('reads the factory a classic UMD wrapper passes in', () => {
+    const src = [
+      '(function (root, factory) {',
+      "  if (typeof module === 'object' && module.exports) module.exports = factory()",
+      '  else root.lib = factory()',
+      '}(this, function () {',
+      '  function parse(s) { return s }',
+      '  var lib = {}',
+      '  lib.parse = parse',
+      '  return lib',
+      '}))',
+      '',
+    ].join('\n')
+    const ex = new PackageExports({}, new Map([['index.js', src], ['obj.js', '(function () {\n  function parse(s) { return s }\n  var lib = {}\n  lib.parse = parse\n  module.exports = lib\n})()\n']]))
+    expect([...ex.forImport('', 'require')!]).toEqual([['parse', t('index.js', 'parse')]])
+    // an object literal built in the IIFE itself
+    expect([...ex.forImport('obj', 'require')!]).toEqual([['parse', t('obj.js', 'parse')]])
+  })
+
+  it('leaves a UMD build unresolved when its exports disagree or the object is ambiguous', () => {
+    const files = new Map([
+      // two different objects handed to module.exports
+      ['two.js', '(function () { function a() {}\nfunction b() {}\nif (x) module.exports = a\nelse module.exports = b })()\n'],
+      // the returned name is declared twice, so which object it is isn't known
+      ['dup.js', '(function () { function make() { var o = {}\nreturn o }\nfunction other() { var o = 1 }\nvar v = make()\nmodule.exports = v })()\n'],
+    ])
+    const ex = new PackageExports({}, files)
+    expect([...ex.forImport('two', 'require')!]).toEqual([])
+    expect([...ex.forImport('dup', 'require')!]).toEqual([])
   })
 
   it('reads ESM exports and skips re-exports from elsewhere', () => {

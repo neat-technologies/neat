@@ -15,6 +15,9 @@ import { resolveInPackage } from './resolve.js'
 // - ESM `export function / class / const`, `export { a as b }`, `export default`
 // - a browserify standalone bundle: the entry module's `module.exports` /
 //   `exports.x`, naming a definition inside that module
+// - a single-file UMD / IIFE build: the object its `module.exports` is set to,
+//   followed through `var v = f()` to what `f` returns, and that object's
+//   `obj.name = fn` members where it is built
 //
 // Not resolved: re-exports (`exports.x = require('./y')`, `export … from`),
 // anything assigned at runtime (a mixin loop), and computed or nested exports.
@@ -213,6 +216,127 @@ export function browserifyEntryBody(root: Parser.SyntaxNode): Parser.SyntaxNode 
   return null
 }
 
+// The body of an immediately invoked function, through the wrappers bundlers
+// write: `(function () { … })()`, `(function () { … }.call(this))`,
+// `!function () { … }()`. Returns the function node and its call's arguments.
+function iife(expr: Parser.SyntaxNode | null): { fn: Parser.SyntaxNode; args: Parser.SyntaxNode[] } | null {
+  let cur = expr
+  while (cur?.type === 'parenthesized_expression' || cur?.type === 'unary_expression') {
+    cur = cur.type === 'unary_expression' ? cur.childForFieldName('argument') : cur.namedChild(0)
+  }
+  if (cur?.type !== 'call_expression') return null
+  let callee = cur.childForFieldName('function')
+  const args = cur.childForFieldName('arguments')?.namedChildren.filter((n) => !isComment(n)) ?? []
+  let callArgs = args
+  while (callee?.type === 'parenthesized_expression') callee = callee.namedChild(0)
+  if (callee?.type === 'member_expression') {
+    // `fn.call(thisArg, ...args)`: the function's own arguments follow thisArg.
+    const prop = callee.childForFieldName('property')?.text
+    if (prop !== 'call' && prop !== 'apply') return null
+    callee = callee.childForFieldName('object')
+    callArgs = prop === 'call' ? args.slice(1) : []
+    while (callee?.type === 'parenthesized_expression') callee = callee.namedChild(0)
+  }
+  return callee && functionBody(callee) ? { fn: callee, args: callArgs } : null
+}
+
+const FUNCTION_NODES = new Set(['function_expression', 'function', 'function_declaration', 'arrow_function', 'generator_function', 'generator_function_declaration'])
+
+function descendants(node: Parser.SyntaxNode, type: string): Parser.SyntaxNode[] {
+  const out: Parser.SyntaxNode[] = []
+  const walk = (n: Parser.SyntaxNode) => {
+    if (n.type === type) out.push(n)
+    for (const c of n.namedChildren) walk(c)
+  }
+  walk(node)
+  return out
+}
+
+/**
+ * Where the value of a single-file bundle's `module.exports` gets its members
+ * (the UMD / IIFE build a package ships as `main` beside its modular files).
+ * The whole file is one immediately invoked function; somewhere inside it
+ * assigns `<x>.exports = <value>` (`module.exports`, or the `freeModule` alias a
+ * UMD header makes). The value is followed through identifiers, `var v = f()`
+ * calls to a local function (to the identifier that function returns), and a
+ * factory passed as the IIFE's argument. What comes back is that object's name
+ * and the function body its members are assigned in (`lodash.template =
+ * template` inside `runInContext`). Null for any other file, or when the chain
+ * leaves what is written in the file.
+ */
+export function bundleExportObject(root: Parser.SyntaxNode): { name: string; scope: Parser.SyntaxNode } | null {
+  const stmts = root.namedChildren.filter((n) => !isComment(n) && n.type !== 'empty_statement')
+  if (stmts.length !== 1 || stmts[0]!.type !== 'expression_statement') return null
+  const outer = iife(stmts[0]!.namedChild(0))
+  if (!outer) return null
+  const outerBody = functionBody(outer.fn)!
+
+  // The function an identifier names in the bundle: a declaration, a
+  // `var f = (function f() { … })`, or an IIFE parameter bound to a function
+  // argument (the UMD factory).
+  const functionNamed = (name: string): Parser.SyntaxNode | null => {
+    const params = outer.fn.childForFieldName('parameters')?.namedChildren ?? []
+    const at = params.findIndex((p) => p.type === 'identifier' && p.text === name)
+    if (at >= 0) {
+      let arg: Parser.SyntaxNode | null = outer.args[at] ?? null
+      while (arg?.type === 'parenthesized_expression') arg = arg.namedChild(0)
+      return arg && FUNCTION_NODES.has(arg.type) ? arg : null
+    }
+    const hits: Parser.SyntaxNode[] = []
+    for (const d of descendants(outerBody, 'function_declaration')) if (d.childForFieldName('name')?.text === name) hits.push(d)
+    for (const d of descendants(outerBody, 'variable_declarator')) {
+      if (d.childForFieldName('name')?.text !== name) continue
+      let v = d.childForFieldName('value')
+      while (v?.type === 'parenthesized_expression') v = v.namedChild(0)
+      if (v && FUNCTION_NODES.has(v.type)) hits.push(v)
+    }
+    return hits.length === 1 ? hits[0]! : null
+  }
+  // The one initializer `var name = …` has in `scope`, or undefined when the
+  // name is declared there without one (or not as a variable), null when ambiguous.
+  const initOf = (name: string, scope: Parser.SyntaxNode): Parser.SyntaxNode | null | undefined => {
+    const decls = descendants(scope, 'variable_declarator').filter((d) => d.childForFieldName('name')?.text === name)
+    if (decls.length === 0) return undefined
+    if (decls.length > 1) return null
+    return decls[0]!.childForFieldName('value') ?? undefined
+  }
+
+  const resolve = (value: Parser.SyntaxNode | null, scope: Parser.SyntaxNode, hops: number): { name: string; scope: Parser.SyntaxNode } | null => {
+    while (value?.type === 'parenthesized_expression') value = value.namedChild(0)
+    if (!value || hops > MAX_DEPTH) return null
+    if (value.type === 'identifier') {
+      const init = initOf(value.text, scope)
+      if (init === null) return null
+      if (init === undefined || FUNCTION_NODES.has(init.type) || init.type === 'class' || init.type === 'object') return { name: value.text, scope }
+      return resolve(init, scope, hops + 1)
+    }
+    if (value.type === 'call_expression') {
+      const callee = value.childForFieldName('function')
+      const fn = callee?.type === 'identifier' ? functionNamed(callee.text) : null
+      const body = functionBody(fn)
+      if (!body) return null
+      // The function's own top-level `return x`, one identifier for every return.
+      const returned = body.namedChildren.filter((n) => n.type === 'return_statement').map((r) => r.namedChild(0))
+      if (returned.length === 0 || returned.some((r) => r?.type !== 'identifier' || r.text !== returned[0]!.text)) return null
+      return resolve(returned[0]!, body, hops + 1)
+    }
+    return null
+  }
+
+  const exported = descendants(outerBody, 'assignment_expression').filter((a) => {
+    const left = a.childForFieldName('left')
+    return left?.type === 'member_expression' && left.childForFieldName('property')?.text === 'exports' && left.childForFieldName('object')?.type === 'identifier'
+  })
+  let found: { name: string; scope: Parser.SyntaxNode } | null = null
+  for (const a of exported) {
+    const r = resolve(a.childForFieldName('right'), outerBody, 0)
+    if (!r) continue
+    if (found && (found.name !== r.name || found.scope.startIndex !== r.scope.startIndex)) return null
+    found = r
+  }
+  return found
+}
+
 /** One module file's exports: export name → the symbol it names. `default` is the whole module value. */
 export function moduleExports(
   root: Parser.SyntaxNode,
@@ -353,6 +477,31 @@ export function moduleExports(
         const local = spec.childForFieldName('name')
         const alias = spec.childForFieldName('alias')
         if (local) set(alias?.text ?? local.text, targetOf(local))
+      }
+    }
+  }
+
+  // A single-file UMD / IIFE build exports nothing at the top level: what a
+  // require of it gets is the object its `module.exports` is set to, and that
+  // object's members are the `obj.name = value` assignments made where it is
+  // built.
+  if (out.size === 0 && !bundle) {
+    const obj = bundleExportObject(root)
+    if (obj) {
+      if (bareCount.get(obj.name) === 1) set(DEFAULT_EXPORT, named(obj.name))
+      for (const stmt of obj.scope.namedChildren) {
+        if (stmt.type !== 'expression_statement') continue
+        let cur: Parser.SyntaxNode | null = stmt.namedChild(0)
+        const names: string[] = []
+        while (cur?.type === 'assignment_expression') {
+          const left = cur.childForFieldName('left')
+          const m = left?.type === 'member_expression' ? /^([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)$/.exec(left.text.replace(/\s+/g, '')) : null
+          if (m && m[1] === obj.name) names.push(m[2]!)
+          cur = cur.childForFieldName('right')
+        }
+        if (names.length === 0) continue
+        const t = targetOf(cur)
+        for (const n of names) set(n, t)
       }
     }
   }

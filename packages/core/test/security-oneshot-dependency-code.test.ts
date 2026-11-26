@@ -31,12 +31,16 @@ const noNetwork = (async (url: string) => {
   throw new Error(`unexpected fetch: ${url}`)
 }) as typeof fetch
 
-// What NEAT's fix-diff of 4.17.20 -> 4.17.21 names for this advisory: the
-// modular template.js copy's `template`.
+// What NEAT's fix-diff of 4.17.20 -> 4.17.21 names for this advisory, cut to
+// `template`: the modular template.js copy and the one bundled into lodash.js
+// (the real changed set lists both, beside the trim/toNumber family).
 const fixDiff: FixDiff = {
   from: '4.17.20',
   to: '4.17.21',
-  changed: [{ file: 'template.js', symbol: 'template', kind: 'function', status: 'modified', namedInAdvisory: true }],
+  changed: [
+    { file: 'lodash.js', symbol: 'template', kind: 'function', status: 'modified', namedInAdvisory: true },
+    { file: 'template.js', symbol: 'template', kind: 'function', status: 'modified', namedInAdvisory: true },
+  ],
 }
 
 // A fresh advisory cache entry for lodash 4.17.15 carrying the real OSV record
@@ -68,6 +72,7 @@ const lodashFiles: Record<string, unknown> = {
   'node_modules/lodash/templateSettings.js': 'var templateSettings = { imports: {} }\nmodule.exports = templateSettings\n',
   'node_modules/lodash/lodash.js': [
     ';(function() {',
+    "  var freeModule = typeof module == 'object' && module",
     '  var runInContext = (function runInContext(context) {',
     '    function template(string, options, guard) { return Function(string) }',
     '    function lodash(value) { return value }',
@@ -75,7 +80,7 @@ const lodashFiles: Record<string, unknown> = {
     '    return lodash',
     '  })',
     '  var _ = runInContext()',
-    "  if (typeof module == 'object' && module) { (module.exports = _)._ = _ }",
+    '  if (freeModule) { (freeModule.exports = _)._ = _ }',
     '}.call(this))',
     '',
   ].join('\n'),
@@ -120,13 +125,27 @@ async function scanCard(root: string): Promise<SecurityCard> {
 
 const DEEP = "const template = require('lodash/template')\nfunction render(a, b) { return template(a)(b) }\nmodule.exports = render\n"
 
-describe('one-shot scan loads matched dependency code (#1763)', () => {
+describe('one-shot scan grades through installed dependency code', () => {
   it('grades a deep require of the changed file reachable-static, as the daemon does', async () => {
     const card = await scanCard(await project(DEEP, { installed: true }))
     expect(card.reachability.level).toBe('reachable-static')
     expect(card.reachability.path!.at(-1)!.to).toBe('symbol:dep:npm:lodash@4.17.15:template.js#template')
     expect(card.reachability.limits).toEqual([])
   })
+
+  // #1761: the package root's `main` is the single-file build, where
+  // `template` is a function inside an IIFE exported as `lodash.template`.
+  for (const [style, app] of [
+    ['a named import', "import { template } from 'lodash'\nexport function render(a, b) { return template(a)(b) }\n"],
+    ['a default import', "import _ from 'lodash'\nexport function render(a, b) { return _.template(a)(b) }\n"],
+    ['a member of the required module', "const _ = require('lodash')\nfunction render(a, b) { return _.template(a)(b) }\nmodule.exports = render\n"],
+  ] as const) {
+    it(`grades ${style} from the package root reachable-static, through the bundled main entry`, async () => {
+      const card = await scanCard(await project(app, { installed: true }))
+      expect(card.reachability.level).toBe('reachable-static')
+      expect(card.reachability.path!.map((h) => h.to)).toEqual(['symbol:dep:npm:lodash@4.17.15:lodash.js#template'])
+    })
+  }
 
   it('stays imported, and says the package is not installed, when no installed copy is found', async () => {
     const card = await scanCard(await project(DEEP, { installed: false }))
