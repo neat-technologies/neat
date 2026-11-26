@@ -17,6 +17,7 @@ import { recordLatency, latencyPercentiles } from '../latency-digest.js'
 import type { NeatGraph } from '../graph.js'
 import type { ParsedSpan } from '../otel.js'
 import { httpResponseStatus } from './span.js'
+import { redactAndClip } from '../credential-scrub.js'
 
 // OBSERVED and INFERRED edge upserts, the last-error exemplar, and the trace
 // stitcher.
@@ -91,7 +92,10 @@ export const EDGE_ERROR_MESSAGE_MAX = 512
 // `lastObserved`. Only fields the caller actually resolved are set — a failure
 // may carry a type, a message, a status, or only some of these — and `message`
 // is trimmed defensively here too, so no caller can route an unbounded string
-// onto the edge.
+// onto the edge. The message also goes through the credential scrub (#1759),
+// the same value redaction the incident ledger applies to the full exception:
+// a failed connection's message can quote its connection string. The scrub runs
+// before the trim, so a credential straddling the ceiling is still redacted.
 export function buildEdgeErrorExemplar(
   detail: { exceptionType?: string; message?: string; httpStatusCode?: number },
   ts: string,
@@ -99,7 +103,7 @@ export function buildEdgeErrorExemplar(
   return {
     ...(detail.exceptionType !== undefined ? { exceptionType: detail.exceptionType } : {}),
     ...(detail.message !== undefined
-      ? { message: detail.message.slice(0, EDGE_ERROR_MESSAGE_MAX) }
+      ? { message: redactAndClip(detail.message, EDGE_ERROR_MESSAGE_MAX).text }
       : {}),
     ...(detail.httpStatusCode !== undefined ? { httpStatusCode: detail.httpStatusCode } : {}),
     at: ts,

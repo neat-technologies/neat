@@ -10,6 +10,7 @@ import {
   fileId,
 } from '@neat.is/types'
 import type { NeatGraph } from '../../graph.js'
+import { redactAndClip } from '../../credential-scrub.js'
 import { noteSkippedFile } from '../errors.js'
 import { loadIgnoreChain, extendIgnoreChain, isIgnored, decide, type IgnoreChain } from '../gitignore.js'
 import {
@@ -243,13 +244,28 @@ export function lineOf(text: string, needle: string): number {
 // of edges that way and the snapshot could not be written at all (#1254).
 const SNIPPET_MAX_CHARS = 120
 
+// The line also goes through the credential scrub (#1759), the same value
+// redaction every ledger row gets: a literal key or a connection string with a
+// password in the source line is redacted before it becomes evidence, so the
+// graph never holds a copy of it. The scrub runs before the cap, so a secret
+// that straddles the cut is redacted rather than half kept.
 export function snippet(text: string, line: number): string {
   const lines = text.split('\n')
-  const raw = (lines[line - 1] ?? '').trim()
-  if (raw.length <= SNIPPET_MAX_CHARS) return raw
+  return clipEvidence((lines[line - 1] ?? '').trim())
+}
+
+/**
+ * A source fragment made safe to keep as evidence: credential-shaped values
+ * redacted and the result capped at SNIPPET_MAX_CHARS. The one place both rules
+ * live; snippet() and every producer that takes its fragment from somewhere
+ * other than a line number go through it.
+ */
+export function clipEvidence(raw: string): string {
+  const { text, cut } = redactAndClip(raw, SNIPPET_MAX_CHARS)
+  if (cut === 0) return text
   // Say it was cut and by how much, so a reader can tell a truncated fragment
   // from a genuinely short line — and spot a minified file for what it is.
-  return `${raw.slice(0, SNIPPET_MAX_CHARS)}… (+${raw.length - SNIPPET_MAX_CHARS} chars)`
+  return `${text}… (+${cut} chars)`
 }
 
 // Forward-slash a path so a FileNode id is byte-stable across platforms (the

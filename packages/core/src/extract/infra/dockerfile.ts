@@ -6,7 +6,7 @@ import type { NeatGraph } from '../../graph.js'
 import { exists, makeEdgeId, type DiscoveredService } from '../shared.js'
 import { recordExtractionError } from '../errors.js'
 import { makeInfraNode } from './shared.js'
-import { ensureFileNode, toPosix } from '../calls/shared.js'
+import { clipEvidence, ensureFileNode, toPosix } from '../calls/shared.js'
 import { declared } from '../declare.js'
 
 interface DockerfileFacts {
@@ -120,7 +120,7 @@ export async function addDockerfileRuntimes(
         confidence: confidenceForExtracted('structural'),
         evidence: {
           file: evidenceFile,
-          ...(facts.entrypoint ? { snippet: facts.entrypoint.slice(0, 120) } : {}),
+          ...(facts.entrypoint ? { snippet: clipEvidence(facts.entrypoint) } : {}),
         },
       }
       graph.addEdgeWithKey(edgeId, edge.source, edge.target, edge)
