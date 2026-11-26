@@ -113,9 +113,12 @@ const VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // dump: //registry.npmjs.org/:_authToken=..., _auth=..., _password=...
   [/\b(_(?:authToken|auth|password)\s*=\s*)[^\s"']+/g, `$1${REDACTED}`],
   // Env-style assignments of upper-case credential names, as a build log prints
-  // them: NPM_TOKEN=..., AWS_SECRET_ACCESS_KEY=...
+  // them: NPM_TOKEN=..., AWS_SECRET_ACCESS_KEY=... A value that goes on into a
+  // call, an index or a member (`API_TOKEN = os.environ.get("API_TOKEN", "...")`,
+  // `SECRET_KEY = os.environ["SECRET_KEY"]`) is an expression, not the secret, so
+  // it is left for the patterns below that read the literal inside it.
   [
-    /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*=\s*)(["']?)[^\s"']+\3/g,
+    /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*=\s*)(["']?)[^\s"'([{]+\3(?![\w$.([{"'])/g,
     `$1$2$3${REDACTED}$3`,
   ],
   // A credential name given a quoted literal in source, as an evidence snippet
