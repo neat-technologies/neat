@@ -41,6 +41,10 @@ Old snapshots load cleanly into the new schema. New snapshots cannot be loaded b
 
 That holds at both entry points, through one function: `migrateSnapshot` runs the chain for a snapshot read off disk (`loadGraphFromDisk`) and for one pushed over `POST /snapshot` by `neat sync --to`. A push from an older CLI is brought forward and merged; a push newer than the daemon is refused with its version named, since there is nothing to migrate down to. The push route used to compare versions for exact equality, so every bump made every already-published CLI's `sync --to` answer 400 until the user upgraded (#1307).
 
+## Credential scrub on load
+
+The free text an edge carries, `evidence.snippet` (a source line) and `signal.lastError.message` (a span's failure message), is scrubbed by its producer as it is written (`snippet()`, `buildEdgeErrorExemplar`). `migrateSnapshot` applies the same value redaction (`scrubEdgeText` in `credential-scrub.ts`, no second pattern set) to every edge of every snapshot it reads, so an edge written before the producers scrubbed is clean in memory after a disk load or a `POST /snapshot` push (#1759). When a disk load scrubs anything, `loadGraphFromDisk` saves the snapshot back at once so the file at rest is clean too; a clean snapshot is not rewritten. The scrub is not a shape change and does not bump `SCHEMA_VERSION`.
+
 ## Lifecycle
 
 - **Loaded once at startup.** `loadGraphFromDisk` runs in `server.ts` / `watch.ts` boot.

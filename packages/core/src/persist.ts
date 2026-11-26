@@ -14,6 +14,7 @@ import {
   serviceId,
 } from '@neat.is/types'
 import { canonicalEngine } from './compat.js'
+import { scrubEdgeText } from './credential-scrub.js'
 import type { NeatGraph } from './graph.js'
 
 export const SCHEMA_VERSION = 11
@@ -496,7 +497,31 @@ export function withoutLiveOnlyAttributes<T>(exported: T): T {
   return exported
 }
 
+// The credential scrub over a snapshot's edges (#1759): the free text an edge
+// carries, `evidence.snippet` and `signal.lastError.message`, through the same
+// value redaction every ledger row gets. The producers scrub as they write; this
+// catches an edge written before they did, in a snapshot read off disk or pushed
+// over POST /snapshot. Rewrites the edges in place and returns how many changed.
+function scrubSnapshotEdges(exported: PersistedGraph['graph']): number {
+  const edges = (exported as { edges?: Array<{ attributes?: unknown }> })?.edges
+  if (!Array.isArray(edges)) return 0
+  let scrubbed = 0
+  for (const edge of edges) {
+    if (!edge.attributes) continue
+    const clean = scrubEdgeText(edge.attributes)
+    if (clean !== edge.attributes) {
+      edge.attributes = clean
+      scrubbed++
+    }
+  }
+  return scrubbed
+}
+
 export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
+  return migrateAndScrub(input).payload
+}
+
+function migrateAndScrub(input: PersistedGraph): { payload: PersistedGraph; scrubbed: number } {
   let payload = input
   if (payload.schemaVersion === 1) {
     payload = migrateV1ToV2(payload)
@@ -533,8 +558,11 @@ export function migrateSnapshot(input: PersistedGraph): PersistedGraph {
       `persist: unsupported snapshot schemaVersion ${payload.schemaVersion} (expected ${SCHEMA_VERSION})`,
     )
   }
-  // Every snapshot read (disk load and POST /snapshot) drops live-only state.
-  return { ...payload, graph: withoutLiveOnlyAttributes(payload.graph) }
+  // Every snapshot read (disk load and POST /snapshot) drops live-only state and
+  // has the credential scrub applied to its edge text.
+  const graph = withoutLiveOnlyAttributes(payload.graph)
+  const scrubbed = scrubSnapshotEdges(graph)
+  return { payload: { ...payload, graph }, scrubbed }
 }
 
 export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Promise<void> {
@@ -545,9 +573,13 @@ export async function loadGraphFromDisk(graph: NeatGraph, outPath: string): Prom
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
     throw err
   }
-  const payload = migrateSnapshot(JSON.parse(raw) as PersistedGraph)
+  const { payload, scrubbed } = migrateAndScrub(JSON.parse(raw) as PersistedGraph)
   graph.clear()
   graph.import(payload.graph)
+  // A snapshot written before the edge scrub existed still holds the raw text on
+  // disk. Save it back once so the file at rest is clean too, not only the graph
+  // in memory; a clean snapshot is left untouched.
+  if (scrubbed > 0) await saveGraphToDisk(graph, outPath)
 }
 
 export interface PersistLoopOptions {

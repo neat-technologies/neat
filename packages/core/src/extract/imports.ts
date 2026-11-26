@@ -16,6 +16,7 @@ import {
 import type { NeatGraph } from '../graph.js'
 import { isTestPath, type DiscoveredService } from './shared.js'
 import { recordExtractionError } from './errors.js'
+import { redactAndClip } from '../credential-scrub.js'
 import { loadSourceFiles, toPosix } from './calls/shared.js'
 import { declared } from './declare.js'
 
@@ -70,9 +71,11 @@ function stringLiteralText(node: Parser.SyntaxNode): string | null {
   return raw.length === 0 ? null : ''
 }
 
+// The import statement's first line, credential-scrubbed and capped, the same
+// rules snippet() applies (#1759).
 function clipSnippet(text: string): string {
   const oneLine = text.split('\n')[0] ?? text
-  return oneLine.length > 120 ? oneLine.slice(0, 120) : oneLine
+  return redactAndClip(oneLine, 120).text
 }
 
 // ── JS / TS import collection ──────────────────────────────────────────────

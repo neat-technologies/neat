@@ -5,7 +5,8 @@ import type { ErrorEvent } from '@neat.is/types'
 // every runtime incident goes through: OTel spans and connector incidents
 // alike) and again where one is read, so neither a new producer nor a record
 // written before the scrub existed can put a credential header into
-// errors.ndjson or in front of an agent.
+// errors.ndjson or in front of an agent. The same value redaction covers the
+// free text on graph edges, evidence snippets and last-error messages (#1759).
 
 // Header attributes that carry credentials. Some auto-instrumentation copies
 // request/response headers into span attributes wholesale — a `...req.headers`
@@ -113,6 +114,27 @@ export function redactSecretValues(text: string): string {
   return out
 }
 
+// How far past a clip point the scrub still reads. A credential that starts
+// inside the kept text but ends after the cut must still be seen whole, or the
+// clip would keep its first characters unredacted (a URL cut before its `@`).
+// Bounded so a 200 KB minified line costs a 1 KB scan, not a full one.
+const CLIP_LOOKAHEAD = 1024
+
+/**
+ * Redact credential-shaped values, then keep at most `max` characters. The scrub
+ * runs before the clip (on a bounded window past it), so a secret straddling the
+ * cut is redacted rather than half kept. `cut` is how many characters were
+ * dropped, counted after redaction; 0 when the text fit.
+ */
+export function redactAndClip(text: string, max: number): { text: string; cut: number } {
+  const window = text.length > max + CLIP_LOOKAHEAD ? text.slice(0, max + CLIP_LOOKAHEAD) : text
+  const red = redactSecretValues(window)
+  const total = red.length + (text.length - window.length)
+  if (total > max) return { text: red.slice(0, max), cut: total - max }
+  // Redaction shrank the window enough that the whole text fits: scrub it all.
+  return { text: window === text ? red : redactSecretValues(text), cut: 0 }
+}
+
 type AttrValue = ReturnType<typeof sanitizeAttributes>[string]
 
 function redactAttrValue(v: AttrValue): AttrValue {
@@ -194,6 +216,41 @@ export function scrubRecord<T>(value: T): T {
     return (changed ? out : value) as T
   }
   return value
+}
+
+/**
+ * A graph edge's attributes with the credential scrub applied to the two pieces
+ * of free text an edge carries: `evidence.snippet` (a source line, from static
+ * extraction) and `signal.lastError.message` (a span's exception or HTTP failure
+ * message, ADR-236). Everything else on an edge is an identifier, a count or a
+ * path and is left alone. The producers scrub as they write (snippet(),
+ * buildEdgeErrorExemplar); this is the snapshot-load pass for edges written
+ * before they did. Returns the attributes themselves when there is nothing to
+ * change, so a clean edge costs no copy.
+ */
+export function scrubEdgeText<T>(attrs: T): T {
+  if (attrs === null || typeof attrs !== 'object') return attrs
+  const edge = attrs as Record<string, unknown>
+  let out: Record<string, unknown> | undefined
+
+  const evidence = edge.evidence as Record<string, unknown> | undefined
+  if (evidence && typeof evidence === 'object' && typeof evidence.snippet === 'string') {
+    const red = redactSecretValues(evidence.snippet)
+    if (red !== evidence.snippet) {
+      out = { ...edge, evidence: { ...evidence, snippet: red } }
+    }
+  }
+
+  const signal = edge.signal as Record<string, unknown> | undefined
+  const lastError = signal?.lastError as Record<string, unknown> | undefined
+  if (signal && lastError && typeof lastError === 'object' && typeof lastError.message === 'string') {
+    const red = redactSecretValues(lastError.message)
+    if (red !== lastError.message) {
+      out = { ...(out ?? edge), signal: { ...signal, lastError: { ...lastError, message: red } } }
+    }
+  }
+
+  return (out ?? attrs) as T
 }
 
 function isIncidentRecord(row: unknown): row is ErrorEvent {
