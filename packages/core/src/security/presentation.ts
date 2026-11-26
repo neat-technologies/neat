@@ -20,6 +20,7 @@ function describeFixAction(
   action: SecurityFixAction | undefined,
   scope: 'direct' | 'transitive',
   name: string,
+  fixedIn: string[] | null,
 ): string {
   if (!action) return ''
   if (action.kind === 'remove-or-replace') {
@@ -27,12 +28,16 @@ function describeFixAction(
       ? ` No non-breaking bump: a breaking fix exists at ${action.majorTo}, else remove or replace.`
       : ' No safe bump: remove or replace.'
   }
-  if (scope === 'direct') return ` Bump to ${action.to}.`
+  // The action is the dependency's shared target, reconciled across all of its
+  // advisories. When that is not one of this advisory's own fixed releases, say
+  // why, so the reader isn't left wondering which of the two versions to take.
+  const why = fixedIn?.includes(action.to) ? '' : ` to clear every known advisory on ${name}`
+  if (scope === 'direct') return ` Bump to ${action.to}${why}.`
   // A transitive dependency can't be bumped at its own version. Bumping the
   // parent only helps if the parent's range admits the fixed version, which the
   // graph doesn't know, so an override is the reliable move.
-  if (action.via.length) return ` Bump ${action.via.join(', ')} if its range allows, else override ${name} to ${action.to}.`
-  return ` Override ${name} to ${action.to} (transitive, parent unknown).`
+  if (action.via.length) return ` Bump ${action.via.join(', ')} if its range allows, else override ${name} to ${action.to}${why}.`
+  return ` Override ${name} to ${action.to}${why} (transitive, parent unknown).`
 }
 
 // A fix is not done when the scan clears. A bump can clear the advisory and still change behavior (a
@@ -71,7 +76,7 @@ export function headlineFor(card: Omit<SecurityCard, 'headline'>): string {
   } else exposure = `in ${card.service}'s dependencies (${how}${dev}) but no first-party file imports it`
   const fixed = fix.fixedIn?.length ? `Fixed in ${fix.fixedIn.join(', ')}.` : 'No fixed release.'
   const runtime = coverage.instrumented === 'no' ? ' The service is not instrumented, so runtime use is unknown.' : ''
-  return `${pkg} (${adv}) is ${exposure}. ${fixed}${describeFixAction(fix.action, d.scope, d.name)}${verifyClause(card)}${runtime}`
+  return `${pkg} (${adv}) is ${exposure}. ${fixed}${describeFixAction(fix.action, d.scope, d.name, fix.fixedIn)}${verifyClause(card)}${runtime}`
 }
 
 const LEVEL_RANK: Record<SecurityCard['reachability']['level'], number> = {

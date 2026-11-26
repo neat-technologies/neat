@@ -17,7 +17,7 @@ import {
 import type { NeatGraph } from '../src/graph.js'
 import { matchAdvisories, normalizeOsv, inventoryFromGraph } from '../src/advisories/index.js'
 import type { AdvisorySnapshot, OsvRecord } from '../src/advisories/index.js'
-import { buildSecurityCard, buildSecurityCards } from '../src/security-card.js'
+import { buildSecurityCard, buildSecurityCards, reconcileSecurityCards } from '../src/security-card.js'
 import { reconcileDepFixActions } from '../src/advisories/fix-action.js'
 
 // security-card.md: pure composition, the `present` and `imported` steps of the
@@ -101,6 +101,24 @@ describe('security cards (security-card.md)', () => {
     // the admin (transitive) card shares the target but keeps its own via.
     const admin = reconciled.find((c) => c.service === 'admin')!
     expect(admin.fix.action).toEqual({ kind: 'bump-to-fixedIn', to: '4.17.21', via: ['express'] })
+  })
+
+  it('rewrites each headline from the reconciled target, keeping the advisory own fix visible', () => {
+    // #1762: the headline used to say "Bump to 4.17.19" on the p6mc card while
+    // fix.action said 4.17.21.
+    const g = graph()
+    const cards = reconcileSecurityCards(matchFor(g).flatMap((m) => buildSecurityCards(g, m, snapshot)), snapshot)
+    const p6mcShop = cards.find((c) => c.service === 'shop' && c.advisory.id === 'GHSA-p6mc-m468-83gw')!
+    expect(p6mcShop.fix.fixedIn).toEqual(['4.17.19'])
+    expect(p6mcShop.headline).toContain('Fixed in 4.17.19. Bump to 4.17.21 to clear every known advisory on lodash.')
+    expect(p6mcShop.headline).not.toContain('Bump to 4.17.19')
+    // The advisory whose own fix is the shared target reads as a plain bump.
+    const jhmShop = cards.find((c) => c.service === 'shop' && c.advisory.id === 'GHSA-35jh-r3h4-6jhm')!
+    expect(jhmShop.headline).toContain('Fixed in 4.17.21. Bump to 4.17.21.')
+    // A transitive card names the shared target in its override.
+    const p6mcAdmin = cards.find((c) => c.service === 'admin' && c.advisory.id === 'GHSA-p6mc-m468-83gw')!
+    expect(p6mcAdmin.headline).toContain('else override lodash to 4.17.21 to clear every known advisory on lodash.')
+    for (const c of cards) expect(SecurityCardSchema.parse(c)).toEqual(c)
   })
 
   it('reconcile targets the lowest version the matcher clears, past a re-affected range', () => {
