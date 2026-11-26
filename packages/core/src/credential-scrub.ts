@@ -70,6 +70,19 @@ export function sanitizeAttributes(
 // one that needs rewriting.
 export const REDACTED = '[REDACTED]'
 
+// A credential name in any case and style: password, dbPassword, DB_PASSWORD,
+// apiKey, api_key, SECRET_KEY, secretAccessKey, authToken. The name must end in
+// the credential word (with an optional `key` after `secret`), so `tokenizer`
+// or `password_reset_url` is not a credential name.
+const CRED_NAME =
+  '[A-Za-z0-9_$]*?(?:password|passwd|pwd|secret(?:_?key)?|token|api_?key|access_?key|client_?secret|private_?key|auth_?token|credentials?)'
+
+// A non-empty quoted literal whose opening quote is capture group `n`, so the
+// replacement can reuse it. Already redacted values and template interpolations
+// are skipped, which keeps every pattern that uses it idempotent.
+const quotedLiteral = (n: number): string =>
+  `(["'\`])(?!\\[REDACTED\\]\\${n})(?!\\$\\{)(?:(?!\\${n})[^\\\\\\n]|\\\\.)+\\${n}`
+
 const VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // PEM private key blocks, through the END line or the end of a truncated log.
   [/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g, REDACTED],
@@ -104,6 +117,39 @@ const VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [
     /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*=\s*)(["']?)[^\s"']+\3/g,
     `$1$2$3${REDACTED}$3`,
+  ],
+  // A credential name given a quoted literal in source, as an evidence snippet
+  // carries it: an object key (`password: "..."`, `"apiKey": '...'`) or an
+  // assignment (`const apiKey = "..."`, Python `api_key = "..."`), in any case.
+  // Only a literal is replaced: `password: string` and `token: req.headers.x`
+  // carry no value, and `==`, `===` and `=>` never match.
+  [
+    new RegExp(`(?<![A-Za-z0-9_$])(["']?)(${CRED_NAME})\\1(\\s*[:=]\\s*)${quotedLiteral(4)}`, 'gi'),
+    `$1$2$1$3$4${REDACTED}$4`,
+  ],
+  // A literal fallback after an env read of a credential name:
+  // `process.env.DB_PASSWORD || "..."`, `process.env["API_KEY"] ?? '...'`.
+  [
+    new RegExp(
+      `(process\\.env(?:\\.${CRED_NAME}|\\[\\s*["'\`]${CRED_NAME}["'\`]\\s*\\])\\s*(?:\\|\\||\\?\\?)\\s*)${quotedLiteral(2)}`,
+      'gi',
+    ),
+    `$1$2${REDACTED}$2`,
+  ],
+  // The Python form: `os.environ.get("SECRET", "...")`, `os.getenv('API_KEY', '...')`.
+  [
+    new RegExp(`(os\\.(?:environ\\.get|getenv)\\(\\s*(["'])${CRED_NAME}\\2\\s*,\\s*)${quotedLiteral(3)}`, 'gi'),
+    `$1$3${REDACTED}$3`,
+  ],
+  // An unquoted `password=value` with nothing around the `=`, as a log line or a
+  // connection-option string prints it, in any case. Spaced code assignments are
+  // left to the literal pattern above.
+  [new RegExp(`(?<![A-Za-z0-9_$])(${CRED_NAME}=)(?!\\[REDACTED\\])[^\\s"'\`&,;)\\]}]+`, 'gi'), `$1${REDACTED}`],
+  // A password named in error prose: "... with password hunter2". Words that
+  // describe the method ("with password authentication") are left alone.
+  [
+    /\b((?:with|using)\s+(?:the\s+)?password\s+)(["']?)(?!\[REDACTED\])(?!(?:authentication|auth|reset|login|hash|hashing|protection|policy|prompt|change|grant|flow|based|only|enabled|disabled|and|or|for|from|to|in|on|of)\b)[^\s"']+\2/gi,
+    `$1$2${REDACTED}$2`,
   ],
 ]
 
