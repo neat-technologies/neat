@@ -1,7 +1,7 @@
 import type { NeatGraph } from './graph.js'
 import { advisoryDisclosureFor, inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
 import { discoverServices } from './extract/services.js'
-import { dropDependencyCode, extractDependencyCode } from './extract/dependency-symbols/index.js'
+import { dropDependencyCode, extractDependencyCode, type DependencySymbolsResult } from './extract/dependency-symbols/index.js'
 import { isImportedDependency } from './security-card.js'
 import { isDependencyNodeId, isDependencySymbolId } from '@neat.is/types'
 
@@ -11,7 +11,9 @@ import { isDependencyNodeId, isDependencySymbolId } from '@neat.is/types'
 // cadence under the daemon, like the connector and flag-store loops, because it
 // needs the advisory match and so the network (through the advisory cache,
 // refreshed at most daily). The extraction pass stays offline, and the security
-// tools only read what this loop left in the graph.
+// queries over the daemon's graph only read what this loop left in it. The
+// one-shot `neat security` verbs own a scratch graph and run the same extraction
+// step themselves (loadMatchedDependencyCode below).
 //
 // Each tick: match the graph's inventory against the advisory snapshot, extract
 // the code of every matched version, and drop the code of any version that no
@@ -88,12 +90,29 @@ export async function runDependencyCodeTick(
   }
 
   if (matched.size > 0 && !stopped()) {
-    const services = await discoverServices(input.projectDir)
-    const r = await extractDependencyCode(input.graph, services, input.projectDir, [...matched].sort(), input.env)
+    const r = await loadMatchedDependencyCode(input.graph, input.projectDir, [...matched], input.env)
     result.extracted = r.nodesAdded
     result.notLocated = r.notLocated.length
   }
   return result
+}
+
+/**
+ * Extract the code of the given (advisory-matched) dependency versions from
+ * their installed copies under `projectDir`. The loop's extraction step, and the
+ * one the one-shot `neat security` verbs run on their scratch graph between the
+ * advisory match and the card build (dependency-inventory.md §5), so both grade
+ * the same checkout the same way. `notLocated` lists the versions with no
+ * installed copy at the matched version.
+ */
+export async function loadMatchedDependencyCode(
+  graph: NeatGraph,
+  projectDir: string,
+  dependencyIds: readonly string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<DependencySymbolsResult> {
+  const services = await discoverServices(projectDir)
+  return extractDependencyCode(graph, services, projectDir, [...new Set(dependencyIds)].sort(), env)
 }
 
 // Said once per process, not once per project slot (advisory-cache.md §2).

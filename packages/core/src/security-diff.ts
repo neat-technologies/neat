@@ -9,6 +9,8 @@ import type { InventoryItem } from './advisories/index.js'
 import { extractFromDirectory } from './extract.js'
 import { makeGraph, type NeatGraph } from './graph.js'
 import { buildSecurityCards, isImportedDependency, rankSecurityCards, reconcileSecurityCards } from './security-card.js'
+import { loadMatchedCode, type LoadDependencyCode } from './security-scan.js'
+import { loadMatchedDependencyCode } from './dependency-code-loop.js'
 
 // scan_diff (security-card.md §6): the known vulnerabilities a change introduced,
 // removed and left in place. It is the check behind "the fix removed the CVE and
@@ -95,6 +97,9 @@ export interface ScanDiffOptions {
   now?: () => number
   // Only this service (its name or its node id).
   service?: string
+  // Load matched dependency code into each side's graph before its cards are
+  // built (security-scan.ts). scanDiffLocal passes it for its scratch graphs.
+  loadDependencyCode?: LoadDependencyCode
 }
 
 function serviceName(graph: NeatGraph, service: string): string {
@@ -131,14 +136,16 @@ export async function scanDiffGraphs(
     return { ...head, asOf: null, introduced: [], removed: [], stillPresent: [], context: { introduced: [], removed: [] } }
   }
   const snapshot = loaded.snapshot
-  const cardsOf = (graph: NeatGraph, inv: InventoryItem[]) => {
+  const cardsOf = async (graph: NeatGraph, inv: InventoryItem[]) => {
     const want = opts.service ? serviceName(graph, opts.service) : undefined
+    const matches = matchAdvisories(inv, snapshot)
+    const notInstalled = await loadMatchedCode(graph, matches, opts.loadDependencyCode)
     // One fix target per dependency across its advisories, as scanProjectCves
     // gives it, so a diff and a scan never suggest different bumps for one package.
-    return reconcileSecurityCards(matchAdvisories(inv, snapshot).flatMap((m) => buildSecurityCards(graph, m, snapshot)), snapshot)
+    return reconcileSecurityCards(matches.flatMap((m) => buildSecurityCards(graph, m, snapshot, { notInstalled })), snapshot)
       .filter((c) => !want || c.service === want)
   }
-  return { ...head, asOf: snapshot.asOf, ...diffSecurityCards(cardsOf(before, invB), cardsOf(after, invA)) }
+  return { ...head, asOf: snapshot.asOf, ...diffSecurityCards(await cardsOf(before, invB), await cardsOf(after, invA)) }
 }
 
 const MAX_BLOB_BYTES = 2 * 1024 * 1024
@@ -260,7 +267,12 @@ export async function scanDiffLocal(
     const after = makeGraph()
     await extractFromDirectory(before, baseDir, { announce: false })
     await extractFromDirectory(after, headDir, { announce: false })
-    return await scanDiffGraphs(before, after, { base: refs.base, head: refs.head ?? 'working tree' }, opts)
+    // Each side reads dependency code from its own tree. A side materialized from
+    // git carries no installed packages, so its cards say the package isn't
+    // installed rather than borrowing another tree's copy.
+    const dirOf = new Map([[before, baseDir], [after, headDir]])
+    const loadDependencyCode: LoadDependencyCode = (g, ids) => loadMatchedDependencyCode(g, dirOf.get(g)!, ids, opts.env)
+    return await scanDiffGraphs(before, after, { base: refs.base, head: refs.head ?? 'working tree' }, { loadDependencyCode, ...opts })
   } finally {
     await fs.rm(tmp, { recursive: true, force: true })
   }

@@ -2,7 +2,7 @@ import type { ReachabilityAnswer, SecurityScanResult, ServiceNode } from '@neat.
 import { NodeType, Provenance, isDependencySymbolId, parseDependencySymbolId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import { inventoryFromGraph, loadAdvisorySnapshot, matchAdvisories } from './advisories/index.js'
-import type { InventoryItem } from './advisories/index.js'
+import type { AdvisoryMatch, InventoryItem } from './advisories/index.js'
 import { buildSecurityCards, highestLevel, isImportedDependency, rankSecurityCards, reachPath, reconcileSecurityCards } from './security-card.js'
 
 // The security scan behind the reachable-CVE surfaces (security-card.md §6):
@@ -15,6 +15,28 @@ export interface ScanOptions {
   now?: () => number
   // Only cards for this service (its name or its node id).
   service?: string
+  // Load the code of the advisory-matched dependency versions into `graph`
+  // before the cards are built, reporting the versions with no installed copy.
+  // Only a caller that owns the graph passes it: the one-shot `neat security`
+  // verbs over their scratch graph (dependency-inventory.md §5). A read over the
+  // daemon's graph leaves it out and reads what the dependency-code loop left.
+  loadDependencyCode?: LoadDependencyCode
+}
+
+export type LoadDependencyCode = (graph: NeatGraph, dependencyIds: string[]) => Promise<{ notLocated: readonly string[] }>
+
+/**
+ * Run `load` for the matched versions (sorted, deduplicated), returning the set
+ * with no installed copy. No loader, nothing matched: nothing to do.
+ */
+export async function loadMatchedCode(
+  graph: NeatGraph,
+  matches: readonly AdvisoryMatch[],
+  load: LoadDependencyCode | undefined,
+): Promise<Set<string>> {
+  const ids = [...new Set(matches.map((m) => m.dependencyId))].sort()
+  if (!load || ids.length === 0) return new Set()
+  return new Set((await load(graph, ids)).notLocated)
 }
 
 // A service filter given as a node id (`service:shop`) or a bare name (`shop`),
@@ -32,8 +54,10 @@ async function scan(graph: NeatGraph, inventory: InventoryItem[], opts: ScanOpti
   const base = { advisories: loaded.source, stale: loaded.stale, errors: loaded.errors, inventory: inventory.length }
   if (!loaded.snapshot) return { ...base, asOf: null, findings: [], context: [] }
   const snapshot = loaded.snapshot
-  const cards = matchAdvisories(inventory, snapshot)
-    .flatMap((m) => buildSecurityCards(graph, m, snapshot))
+  const matches = matchAdvisories(inventory, snapshot)
+  const notInstalled = await loadMatchedCode(graph, matches, opts.loadDependencyCode)
+  const cards = matches
+    .flatMap((m) => buildSecurityCards(graph, m, snapshot, { notInstalled }))
     .filter((c) => !opts.service || c.service === serviceName(graph, opts.service))
   // One shared fix target per dependency across its advisories, so an agent bumps
   // once instead of once per CVE (ADR-274 fix loop).

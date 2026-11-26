@@ -28,11 +28,19 @@ type PathHop = NonNullable<SecurityCard['reachability']['path']>[number]
  * The card for one advisory match in one service, or null when the service
  * doesn't depend on that version or the advisory isn't in the snapshot.
  */
+export interface SecurityCardContext {
+  // Dependency versions whose code the caller tried to load and found no
+  // installed copy of (dependency-inventory.md §5). Lets an `imported` card say
+  // "not installed" instead of the generic "code not in the graph".
+  notInstalled?: ReadonlySet<string>
+}
+
 export function buildSecurityCard(
   graph: NeatGraph,
   match: AdvisoryMatch,
   snapshot: AdvisorySnapshot,
   serviceId: string,
+  context: SecurityCardContext = {},
 ): SecurityCard | null {
   const advisory = snapshot.advisories.find((a) => a.id === match.advisoryId)
   if (!advisory || !graph.hasNode(match.dependencyId) || !graph.hasNode(serviceId)) return null
@@ -53,7 +61,11 @@ export function buildSecurityCard(
   const limits: string[] = []
   if (level === 'imported') {
     if (!fixDiff) limits.push('The fix release has not been diffed, so there is no changed code to reach; reachability past the import is unknown.')
-    else if (!codeInGraph) limits.push("The package's own code is not in the graph, so reachability past the import is unknown.")
+    else if (!codeInGraph && context.notInstalled?.has(match.dependencyId)) {
+      limits.push(
+        `No installed copy of ${depNode.name} ${depNode.version} was found under the scanned directory, so its code was not read and reachability past the import is unknown. Install the project's dependencies and scan again to grade past the import; this does not show the code is unreachable.`,
+      )
+    } else if (!codeInGraph) limits.push("The package's own code is not in the graph, so reachability past the import is unknown.")
     else if (targets.size === 0) limits.push('None of the code the fix changed exists under the same file and name in the installed version.')
     else if (!callsIntoPackage(graph, serviceName, match.dependencyId)) {
       // The search never got into the package, which is a different statement
@@ -136,7 +148,12 @@ export function reconcileSecurityCards(cards: SecurityCard[], snapshot: Advisory
 }
 
 /** One card per service that depends on the matched version, in service-id order. */
-export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snapshot: AdvisorySnapshot): SecurityCard[] {
+export function buildSecurityCards(
+  graph: NeatGraph,
+  match: AdvisoryMatch,
+  snapshot: AdvisorySnapshot,
+  context: SecurityCardContext = {},
+): SecurityCard[] {
   if (!graph.hasNode(match.dependencyId)) return []
   const services = new Set<string>()
   graph.forEachInEdge(match.dependencyId, (_e, attrs, source) => {
@@ -144,6 +161,6 @@ export function buildSecurityCards(graph: NeatGraph, match: AdvisoryMatch, snaps
   })
   return [...services]
     .sort()
-    .map((s) => buildSecurityCard(graph, match, snapshot, s))
+    .map((s) => buildSecurityCard(graph, match, snapshot, s, context))
     .filter((c): c is SecurityCard => c !== null)
 }
