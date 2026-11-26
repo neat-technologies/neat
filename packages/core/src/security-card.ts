@@ -2,7 +2,7 @@ import type { DependencyNode, GraphEdge, GraphNode, SecurityCard, ServiceNode } 
 import { EdgeType, NodeType, Provenance, SecurityCardSchema, isDependencySymbolId, securityCardId } from '@neat.is/types'
 import type { NeatGraph } from './graph.js'
 import type { AdvisoryMatch, AdvisorySnapshot } from './advisories/match.js'
-import { fixActionFor } from './advisories/fix-action.js'
+import { fixActionFor, reconcileDepFixActions } from './advisories/fix-action.js'
 import { changedTargets } from './security/fix-diff-targets.js'
 import { callsIntoPackage, dependsOnEdge, importersOf, instrumented, reachPath } from './security/reachability.js'
 import { headlineFor } from './security/presentation.js'
@@ -122,6 +122,17 @@ export function buildSecurityCard(
     coverage: { instrumented: instrumented(graph, serviceId, serviceName) },
   }
   return SecurityCardSchema.parse({ ...card, headline: headlineFor(card) })
+}
+
+/**
+ * One shared fix target per dependency across its advisories (ADR-274 fix loop),
+ * with each headline rewritten from the reconciled action. The headline is
+ * composed per advisory in buildSecurityCard, before the full card set exists, so
+ * without the rewrite it would name the advisory's own fix while `fix.action`
+ * names the reconciled one.
+ */
+export function reconcileSecurityCards(cards: SecurityCard[], snapshot: AdvisorySnapshot): SecurityCard[] {
+  return reconcileDepFixActions(cards, snapshot).map((c) => ({ ...c, headline: headlineFor(c) }))
 }
 
 /** One card per service that depends on the matched version, in service-id order. */
